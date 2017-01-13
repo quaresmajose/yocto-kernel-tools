@@ -246,10 +246,6 @@ process_file()
         )
     )
 
-    if [ -n "${verbose}" ]; then
-        cat ${scc_output_file}
-    fi
-
     if [ $? -ne 0 ]; then
         echo "[ERROR]: processing of file $in failed"
         cat ${scc_output_file}
@@ -275,6 +271,8 @@ process_file()
         fi
 	rm -f ${scc_output_file}
         exit 1
+    elif [ -n "${verbose}" ]; then
+        cat ${scc_output_file}
     fi
 
     rm -f ${scc_output_file}
