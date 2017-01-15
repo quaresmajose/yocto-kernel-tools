@@ -132,6 +132,15 @@ function sanitize_fragment ()
 		echo $LASTVAL|grep -q ' is not set$'
 		TAIL_OK=$?
 
+		echo $LASTVAL | grep -q '.* ='
+		if [ $? -eq 0 ]; then
+			space_before_equals=t
+		fi
+		echo $LASTVAL | grep -q '= '
+		if [ $? -eq 0 ]; then
+			space_after_equals=t
+		fi
+
 		grep -q -w $i $CLEAN_FRAG
 		if [ $? == 0 ] ; then	
 			echo Warning: Value of $i is defined multiple times within fragment $ORIG_FRAG:
@@ -141,6 +150,8 @@ function sanitize_fragment ()
 			# Enforce proper "# CONFIG_FOO is not set" syntax.
 			# LKC would ignore it anyway, so let them know.
 			echo Warning: Ignoring \"$LASTVAL\" -- invalid CONFIG syntax.
+		elif [ -n "$space_before_equals" ] || [ -n "$space_after_equals" ]; then
+			echo Warning: Ignoring \"$LASTVAL\" -- spaces around equals are invalid
 		else
 			echo $LASTVAL >> $CLEAN_FRAG
 		fi
