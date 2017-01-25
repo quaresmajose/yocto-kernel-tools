@@ -254,6 +254,20 @@ for fline in `cat ${meta_series}`; do
                 fi
             fi
             ;;
+        merge:*)
+            b=$(echo ${fline} | cut -d: -f2 | sed 's%^\ %%')
+            check_branch ${b}
+            if [ $? -ne 0 ]; then
+                echo "ERROR. branch ${b} does not exist, can't merge"
+                exit 1
+            else
+                echo "[INFO]: branch merge: ${b}"
+                eval git merge -q --no-ff -m \"Merge branch ${b}\" ${b}
+                if [ $? -ne 0 ]; then
+                exit 1
+                fi
+            fi
+            ;;
         *)
             ;;
     esac
