@@ -358,9 +358,10 @@ if [ $? -eq 0 ]; then
     outfile_start="> $outfile"
 fi
 
-# And we optionally set up pointers to a patch and config.queue
+# And we optionally set up pointers to a patch, config and merge queues
 configqueue="/dev/null"
 patchqueue="${outdir}/unused.patch.queue"
+mergequeue="${outdir}/unused.merge.queue"
 
 echo ${artifacts} | grep -w -q cfg
 if [ $? -eq 0 ]; then
@@ -373,6 +374,13 @@ if [ $? -eq 0 ]; then
     rm -f ${patchqueue}
     patchqueue="${outdir}/patch.queue"
     rm -f "${outdir}"/patch*.queue
+fi
+echo ${artifacts} | grep -w -q merge
+if [ $? -eq 0 ]; then
+    # remove the emp variant
+    rm -f ${mergequeue}
+    mergequeue="${outdir}/merge.queue"
+    rm -f "${outdir}"/merge.queue
 fi
 
 # preprocess the files.
@@ -403,6 +411,10 @@ fi
 echo ${patchqueue} | grep -q unused.queue
 if [ $? -eq 0 ]; then
     rm -f ${patchqueue}
+fi
+echo ${mergequeue} | grep -q unused.queue
+if [ $? -eq 0 ]; then
+    rm -f ${mergequeue}
 fi
 
 exit $ret

@@ -32,7 +32,10 @@ branch()
     text="branch: ${cbranch_name}"
     eval echo "\$text" $outfile_append
 
-    # generate a branch specific patch queue
+    # generate branch specific queues
     branch_patch_queue="patch.$(echo ${cbranch_name} | sed 's%/%.%g').queue"
     branch_patch_queue="$(dirname ${patchqueue})/${branch_patch_queue}"
+
+    branch_merge_queue="patch.$(echo ${cbranch_name} | sed 's%/%.%g').queue"
+    branch_merge_queue="$(dirname ${patchqueue})/${branch_merge_queue}"
 }
