@@ -29,6 +29,7 @@ cat <<EOF
     --current:   show top currently applied patch
     --annotated: the series is annotated, use the annotations for auto resume
     --fuzzy:     match autoresume on fuzzy heuristics (i.e. subject only)
+    --clean:     remove any patch artifacts that may remain from previous runs (i.e. sentinel files)
     -c:          number of commits to test when autoresuming
     -a:          autoresume series after last sucessfully applied patch
     -i:          interactively prompt if commit information is missing
@@ -304,6 +305,9 @@ do
 	-f)
 		FORCE=1
 		;;
+        --clean)
+                CLEAN=1
+                ;;
 	--gen)
 		;;
 	--series)
@@ -486,6 +490,12 @@ APPLIED=0
 
 # Find the intial commit
 commit=$(git rev-parse HEAD)
+
+if [ -n "${CLEAN}" ]; then
+    # clean up and then exit
+    rm -f $GIT_DIR/kgit-s2q.last
+    rm -f $GIT_DIR/kgit-s2q.previous
+fi
 
 if [ -z "${START}" ]; then
     if  [ -f "$GIT_DIR/kgit-s2q.last" ]; then
