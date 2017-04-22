@@ -366,14 +366,17 @@ get_meta_dir()
 	fi
     done
 
-    # store our results where other scripts can quickly find the answer
-    if [ -n "$md" ]; then
-        echo "$md" > .metadir
-    else
-        mkdir ".$meta_branch"
-        md=".$meta_branch"
-        echo ".$meta_branch" > .metadir
+    # if nothing was found, we create the minimal structure
+    if [ -z "$md" ]; then
+        md=".kernel-meta"
     fi
+
+    mkdir -p "${md}/cfg/scratch"
+
+    # store our results where other scripts can quickly find the answer
+    echo "${md}" > .metadir
+    # return the directory to he caller
+    echo $md
 
     # return the directory to he caller
     echo $md
@@ -381,6 +384,13 @@ get_meta_dir()
 
 META=`get_meta_dir`
 BRANCH=`get_branch`
+
+if [ -n "${CLEAN}" ]; then
+    # clean up and then exit
+    rm -f $GIT_DIR/kgit-s2q.last
+    rm -f $GIT_DIR/kgit-s2q.previous
+    exit 0
+fi
 
 # Quilt Author
 if [ -n "$quilt_author" ] ; then
@@ -490,12 +500,6 @@ APPLIED=0
 
 # Find the intial commit
 commit=$(git rev-parse HEAD)
-
-if [ -n "${CLEAN}" ]; then
-    # clean up and then exit
-    rm -f $GIT_DIR/kgit-s2q.last
-    rm -f $GIT_DIR/kgit-s2q.previous
-fi
 
 if [ -z "${START}" ]; then
     if  [ -f "$GIT_DIR/kgit-s2q.last" ]; then
