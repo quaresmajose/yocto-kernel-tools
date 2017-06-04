@@ -605,7 +605,7 @@ process_file()
 
             if [ -n "$inherited_inhibit_patch" ]; then
                 echo "# inhibited patch"
-                echo "true `dirname $in`/$patch_name"
+                echo "true \"`dirname $in`/$patch_name\""
             else
                 if [ ! -f `dirname $in`/$patch_name ]; then
                     local patch_name_new=`search_include_paths $patch_name $include_paths`
@@ -648,7 +648,7 @@ process_file()
 
             if [ -n "$inherited_inhibit_cfg" ] && [ -z "$arg1" ]; then
                 echo "# inhibited kconf"
-                echo "true `dirname $in`/$kconf_name"
+                echo "true \"`dirname $in`/$kconf_name\""
             else
                 if [ ! -f `dirname $in`/$kconf_name ]; then
                     local kconf_name_new=`search_include_paths $kconf_name $include_paths`
