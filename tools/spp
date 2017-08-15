@@ -178,7 +178,7 @@ search_includes_for_defines()
         done
 
         if [ -n "${verbose}" ]; then
-            echo "checking $scc ($score)" >&2
+            >&2 echo "checking $scc ($score)" >&2
         fi
 
         if [ $score -gt $max_score ]; then
@@ -189,11 +189,17 @@ search_includes_for_defines()
         fi
     done
 
-    # return the first target found (among equals)
-    rstring="$(echo $found_scc | cut -f2 -d' ')"
+    if [ -n "${verbose}" ]; then
+        >&2 echo "score: $max_score"
+    fi
 
-    # .. and add the score
-    echo "$rstring:$max_score"
+    if [ $max_score -gt 0 ]; then
+        # return the first target found (among equals)
+        rstring="$(echo $found_scc | cut -f2 -d' ')"
+
+        # .. and add the score
+        echo "$rstring:$max_score"
+    fi
 }
 
 search_include_paths()
@@ -306,7 +312,7 @@ if [ -n "${do_find}" ]; then
     fi
 
     # are we looking for a machine/kernel match ?
-    if [ -n"${KMACHINE}" ] && [ -n "${KTYPE}" ]; then
+    if [ -n "${KMACHINE}" ] && [ -n "${KTYPE}" ]; then
         found=$(search_includes_for_defines ${KMACHINE})
         found_file=$(echo $found | cut -d: -f1)
         found_score=$(echo $found | cut -d: -f2)
@@ -317,11 +323,17 @@ if [ -n "${do_find}" ]; then
         found=$(search_includes_for_defines ${KMACHINE}:${KTYPE})
         found_file2=$(echo $found | cut -d: -f1)
         found_score2=$(echo $found | cut -d: -f2)
+
         if [ "${found_score2}" == "2" ]; then
             found_file=${found_file2}
             found_score=${found_score2}
         fi
-        echo "${found_file}"
+
+        if [ -n "${found_file}" ]; then
+            echo "${found_file}"
+        else
+            exit 1
+        fi
     fi
 
     # or are we looking for a file in particular ?
