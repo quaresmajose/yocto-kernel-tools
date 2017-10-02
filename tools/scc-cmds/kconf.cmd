@@ -23,7 +23,7 @@ kconf() {
         mkdir -p ${outdir}/configs/${cbranch_name}/
     fi
 
-    #echo "copying config: ${simple_config_name} to ${outdir}/configes/${cbranch_name}/${relative_config_dir}" >&2
+    #echo "copying config: ${simple_config_name} to ${outdir}/configs/${cbranch_name}/${relative_config_dir}" >&2
 
     # we could compare the source and dest, and either warn or clobber, but
     # for now, we just clobber
@@ -34,6 +34,12 @@ kconf() {
     for c in ${frag_dir}/*.kcf ${frag_dir}/hardware.cfg ${frag_dir}/non-hardware.cfg ${frag_dir}/required.cfg ${frag_dir}/optional.cfg; do
         if [ -e "${c}" ]; then
             cp -f ${c} "${outdir}/configs/${cbranch_name}/${relative_config_dir}"
+            if [ "${c}" == "${frag_dir}/non-hardware.cfg" ]; then
+                echo ${outdir}/configs/${cbranch_name}/${relative_config_dir}/${c} >> ${outdir}/non-hardware_frags.txt
+            fi
+            if [ "${c}" == "${frag_dir}/non-hardware.cfg" ]; then
+                echo ${outdir}/configs/${cbranch_name}/${relative_config_dir}/${c} >> ${outdir}/hardware_frags.txt
+            fi
         fi
     done
 

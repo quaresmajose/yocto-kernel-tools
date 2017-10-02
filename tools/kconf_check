@@ -495,8 +495,16 @@ if [ -s $LOGDIR/mismatch.txt ]; then
                 # so we know it was a hardware option, and we should likely report it, but lets
                 # do another check .. if it isn't invalid, we should report it. If it is in the
                 # invalid list we skip it
+                inhibit_report=
                 grep -q -w $opt $LOGDIR/invalid.cfg
-                if [ $? -ne 0 ]; then
+                if [ $? -eq 0 ]; then
+                    inhibit_report=t
+                fi
+                grep -q -w $opt $LOGDIR/input_nonhardware_configs.cfg
+                if [ $? -eq 0 ]; then
+                    inhibit_report=t
+                fi
+                if [ -z "$inhibit_report" ]; then
                     report=t
                 fi
             fi
@@ -512,12 +520,14 @@ if [ -s $LOGDIR/mismatch.txt ]; then
                 echo "" >> $LOGDIR/mismatch.txt
             fi
         done
-        echo -n "[mismatch ($OPT_COUNT)]: "
-        echo $LOGDIR/mismatch.txt
-        echo "   There were hardware options requested that do not"
-        echo "   have a corresponding value present in the final \".config\" file."
-        echo "   This probably means you aren't getting the config you wanted."
-        echo
+        if [ $OPT_COUNT -gt 0 ]; then
+            echo -n "[mismatch ($OPT_COUNT)]: "
+            echo $LOGDIR/mismatch.txt
+            echo "   There were hardware options requested that do not"
+            echo "   have a corresponding value present in the final \".config\" file."
+            echo "   This probably means you aren't getting the config you wanted."
+            echo
+        fi
     else
         OPT_COUNT=`grep '^Actual value' $LOGDIR/mismatch.txt | wc -l | awk '{print $1}'`
         echo -n "[mismatch ($OPT_COUNT)]: "
