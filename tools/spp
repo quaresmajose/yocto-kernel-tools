@@ -19,11 +19,13 @@ usage()
 {
 cat << EOF
 
- spp [--help] [--force] [-i] [-w] [-o outfile] [-D<var>=<value>] [-I<path>] [-v] infiles
+ spp [--help] [--force] [-i] [--fuzz] [-w] [-o outfile] [-D<var>=<value>] [-I<path>] [-v] infiles
 
       --help:      This message
       --force:     force overwrite output file if it already exists
       --find:      Find the .scc file that matches the passed defines (-D)
+      --fuzz:      Use fuzzy logic to find the target file (off by default). Only for
+                   advanced use cases, since partial/close matches will be returned
       -D:          define <var> to <value> which will be available to sub scripts
       -I:          include path <path> will be searched for files
       -i:          leave intermediate files on failure
@@ -71,6 +73,9 @@ while [ $# -gt 0 ]; do
 		;;
 	    --force|-f)
 		force=t
+		;;
+            --fuzz)
+		fuzz=t
 		;;
 	    -i)
 		intermediate=t
@@ -306,7 +311,7 @@ fi
 if [ -n "${do_find}" ]; then
     if [ -z "${KMACHINE}" ] && [ -z "${KTYPE}" ]; then
         if [ -z "${infiles}" ]; then
-            echo "[ERROR]: No files provides, and no KMACHINE and KTYPE defined"
+            echo "[ERROR]: No files provided, and no KMACHINE and KTYPE defined"
             exit 1
         fi
     fi
@@ -327,6 +332,12 @@ if [ -n "${do_find}" ]; then
         if [ "${found_score2}" == "2" ]; then
             found_file=${found_file2}
             found_score=${found_score2}
+        else
+            # if --fuzz is passed, we'll continue with a score of 1, otherwise
+            # we exit
+            if [ -z "${fuzz}" ]; then
+                exit 1
+            fi
         fi
 
         if [ -n "${found_file}" ]; then
