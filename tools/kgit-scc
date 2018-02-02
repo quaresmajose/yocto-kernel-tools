@@ -439,15 +439,29 @@ if [ -n "$init" ]; then
 	    exit 1
 	fi
 
-	(cd $output;
-	 for f in `git ls-files -m`; do
-	     git add $f
-	 done
-	 git commit -s -m "kgit: creating baseline state"
+	(
+            cd $output;
+	    for f in `git ls-files -m`; do
+	        git add $f
+	    done
+	    git commit -s -m "kgit: creating baseline state"
 	)
-
-	fi
-	let phase_count=$phase_count+1
+    else
+        (
+            ii=$(readlink -f $input)
+            cd $output
+            git checkout master
+            git fetch $ii master:master-new
+            mb=$(git merge-base master master-new)
+            if [ -n "${mb}" ]; then
+                git reset --hard ${mb}
+                git pull $ii master
+                git reset --hard ${base_ver}
+                git branch -D master-new
+            fi
+        )
+    fi
+    let phase_count=$phase_count+1
 fi
 
 if [ -z "$base_ver" ]; then
