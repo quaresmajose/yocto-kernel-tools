@@ -243,13 +243,19 @@ for fline in `cat ${meta_series}`; do
                 # now check to see if there's a patch queue
                 qname="patch.${b}.queue"
                 qname="$(echo ${qname} | sed 's%/%.%g')"
+                if [ ! -e "${meta_dir}/${qname}" ]; then
+                    # try it without ".base", in case a branch was renamed
+                    b=$(echo "${b}" | sed 's%/base%%')
+                    qname="patch.${b}.queue"
+                    qname="$(echo ${qname} | sed 's%/%.%g')"
+                fi
                 if [ -e "${meta_dir}/${qname}" ]; then
                     echo "[INFO]: patch queue \"${qname}\" detected, applying patches"
                     rm -f ${meta_dir}/series
                     ln -sf ${qname} ${meta_dir}/series
                     kgit-s2q --gen -v --patches ${meta_dir}
                     if [ $? -ne 0 ]; then
-                    exit 1
+                        exit 1
                     fi
                 fi
             fi
