@@ -129,6 +129,8 @@ for MERGE_FILE in $MERGE_LIST ; do
 		sed -i "/$CFG[ =]/d" $TMP_FILE
 	done
 	cat $MERGE_FILE >> $TMP_FILE
+	# workaround for fragments not ending with carriage return
+	echo >> $TMP_FILE
 done
 
 if [ "$RUNMAKE" = "false" ]; then
