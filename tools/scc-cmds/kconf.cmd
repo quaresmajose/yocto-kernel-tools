@@ -38,7 +38,7 @@ kconf() {
                 echo ${outdir}/configs/${cbranch_name}/${relative_config_dir}/${c} >> ${outdir}/non-hardware_frags.txt
             fi
             if [ "${c}" == "${frag_dir}/non-hardware.cfg" ]; then
-                echo ${outdir}/configs/${cbranch_name}/${relative_config_dir}/${c} >> ${outdir}/hardware_frags.txt
+                echo ${outdir}/configs/${cbranch_name}/${relative_config_dir}/${c} >> ${outdir}/non-hardware_frags.txt
             fi
         fi
     done

@@ -343,7 +343,7 @@ if [ -n "${metadata}" ]; then
     rm -f $LOGDIR/input_nonhardware_configs.cfg~
     touch $LOGDIR/input_nonhardware_configs.cfg
     if [ -s "${metadata}/non-hardware_frags.txt" ]; then
-        for i in `cat ${metadata}/hardware_frags.txt` ; do
+        for i in `cat ${metadata}/non-hardware_frags.txt` ; do
             cat $i | \
                 grep '^\(# \)\{0,1\}CONFIG_[a-zA-Z0-9_]*[=\( is not set\)]' | \
                 sed 's/^\(# \)\{0,1\}\(CONFIG_[a-zA-Z0-9_]*\)[= ].*/\2/' \
