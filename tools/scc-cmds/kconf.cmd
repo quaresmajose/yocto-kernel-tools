@@ -31,14 +31,21 @@ kconf() {
 
     # if there are any classifiers in the fragment dir, we copy them as well
     frag_dir=$(dirname ${frag})
+    # echo "frag dir: ${frag_dir}" >&2
     for c in ${frag_dir}/*.kcf ${frag_dir}/hardware.cfg ${frag_dir}/non-hardware.cfg ${frag_dir}/required.cfg ${frag_dir}/optional.cfg; do
+        local simple_special_name=$(basename ${c})
         if [ -e "${c}" ]; then
             cp -f ${c} "${outdir}/configs/${cbranch_name}/${relative_config_dir}"
+            # echo "c: ${c}" >&2
+            # echo "relative config dir: ${relative_config_dir}"  >&2
+            # echo "cbranch: ${cbranch_name}"  >&2
+            # echo "outdir: ${outdir}"  >&2
+            # echo "config: ${outdir}/configs/${cbranch_name}/${relative_config_dir}/${simple_special_name}" >&2
             if [ "${c}" == "${frag_dir}/non-hardware.cfg" ]; then
-                echo ${outdir}/configs/${cbranch_name}/${relative_config_dir}/${c} >> ${outdir}/non-hardware_frags.txt
+                echo ${outdir}/configs/${cbranch_name}/${relative_config_dir}/${simple_special_name} >> ${outdir}/non-hardware_frags.txt
             fi
-            if [ "${c}" == "${frag_dir}/non-hardware.cfg" ]; then
-                echo ${outdir}/configs/${cbranch_name}/${relative_config_dir}/${c} >> ${outdir}/non-hardware_frags.txt
+            if [ "${c}" == "${frag_dir}/hardware.cfg" ]; then
+                echo ${outdir}/configs/${cbranch_name}/${relative_config_dir}/${simple_special_name} >> ${outdir}/hardware_frags.txt
             fi
         fi
     done
