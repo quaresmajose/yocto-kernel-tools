@@ -456,6 +456,18 @@ if [ -n "$init" ]; then
             if [ -n "${mb}" ]; then
                 git reset --hard ${mb}
                 git pull $ii master
+
+                git cat-file -e ${base_ver} 2> /dev/null
+                if [ $? -ne 0 ]; then
+                    # the commit isn't in the tree, try to fetch it
+                    git fetch -n $ii tag ${base_ver}
+                fi
+
+                git cat-file -e ${base_ver} 2> /dev/null
+                if [ $? -ne 0 ]; then
+                    echo "[ERROR]: could not fetch base revision ${base_ver}"
+                    exit 1
+                fi
                 git reset --hard ${base_ver}
                 git branch -D master-new
             fi
