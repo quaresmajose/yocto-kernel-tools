@@ -1,6 +1,6 @@
 # For testing various minor APIs
 
-# is_optional()
+# optional choices
 
 choice NOT_OPTIONAL
     bool "not optional"
@@ -51,19 +51,28 @@ config HEX
     hex "hex"
     depends on NOT_DEFINED_2
 
+config COMMENT_HOOK
 comment "comment"
+
+config MENU_HOOK
 menu "menu"
     depends on NOT_DEFINED_3 || NOT_DEFINED_2
     depends on !NOT_DEFINED_4
 endmenu
 
 config FROM_ENV
-    string
+    string "from env"
     option env="ENV_VAR"
 
 config FROM_ENV_MISSING
-    string
+    string "from env missing"
     option env="MISSING_ENV_VAR"
+    default "missing"
+
+config FROM_ENV_WEIRD
+    string
+    default "weird"
+    option env="ENV_VAR"
 
 config NOT_ALLNOCONFIG_Y
     bool "not allnoconfig_y"

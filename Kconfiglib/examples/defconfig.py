@@ -1,17 +1,22 @@
 # Works like entering "make menuconfig" and immediately saving and exiting
+#
+# Usage:
+#
+#   $ make [ARCH=<arch>] scriptconfig SCRIPT=Kconfiglib/examples/allyesconfig.py
 
 import kconfiglib
 import os
 import sys
 
-conf = kconfiglib.Config(sys.argv[1])
+kconf = kconfiglib.Kconfig(sys.argv[1])
 
 if os.path.exists(".config"):
-    conf.load_config(".config")
+    print("using existing .config")
+    kconf.load_config(".config")
 else:
-    defconfig = conf.get_defconfig_filename()
-    if defconfig is not None:
-        print("Using" + defconfig)
-        conf.load_config(defconfig)
+    if kconf.defconfig_filename is not None:
+        print("using " + kconf.defconfig_filename)
+        kconf.load_config(kconf.defconfig_filename)
 
-conf.write_config(".config")
+kconf.write_config(".config")
+print("configuration written to .config")

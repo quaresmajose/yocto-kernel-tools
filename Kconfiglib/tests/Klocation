@@ -1,67 +1,70 @@
-# Include some line continuations to make sure they don't mess up line numbers
+if UNDEFINED
+endif
 
-# Defined and referenced in multiple locations
-config A
+config SINGLE_DEF
+    bool
+
+config MULTI_DEF
     bool
 
 # Throw in some line continuations too to make sure it doesn't mess up the line
 # numbers
-menu "menu 1"
-    depends on A
-    visible if A && \
-      NOT_DEFINED
+if y && \
+   y
+if y && \
+   y && \
+   y
 
-# Also defined in Klocation_included
-choice B
-    bool "b" if A
+# Throw in some help texts too
 
-config C
-    bool "c"
+config HELP_1
+    bool "help 1"
+    help
+config HELP_2
+    bool "help 2"
+    help
+      foo
+      bar
 
-config D
-    bool "d"
+        baz
 
-\
+config HELP_3
+    help
+      foo
+      bar
+    bool
 
-endchoice
+config MULTI_DEF
 
-config A
-    def_bool NOT_DEFINED
+endif
+endif
 
-comment "comment 1"
+# Expands to "tests/Klocation_sourced"
+source "$TESTS_DIR_FROM_ENV/Klocation$_SOURCED"
 
-config E
-    bool "E" if A
-    depends on A
+# Expands to "sub/Klocation_rsourced"
+rsource "$SUB_DIR_FROM_ENV/Klocation$_RSOURCED"
 
-endmenu
+# Expands to "tests/*ub/Klocation_gsourced[12]", matching
+# tests/sub/Klocation_gsourced{1,2}
+source "$TESTS_DIR_FROM_ENV/*ub/Klocation$_GSOURCED[12]"
+# Test old syntax too
+gsource "$TESTS_DIR_FROM_ENV/*ub/Klocation$_GSOURCED[12]"
 
-config \
- FOO
-    string
-    option \
-    env\
-    =\
-    "FOO"
+# Expands to "sub/Klocation_grsourced[12]", matching
+# tests/sub/Klocation_grsourced{1,2}
+rsource "$SUB_DIR_FROM_ENV/Klocation$_GRSOURCED[12]"
+# Test old syntax too
+grsource "$SUB_DIR_FROM_ENV/Klocation$_GRSOURCED[12]"
 
-\
-\
+# No-ops
+osource "nonexistent"
+osource "nonexistent*"
+gsource "nonexistent"
+gsource "nonexistent*"
+orsource "nonexistent"
+orsource "nonexistent*"
+grsource "nonexistent"
+grsource "nonexistent*"
 
-config BAR
-    string
-    default \
-      "_included"
-
-# Expands to "tests/Klocation_included"
-source \
-"$FOO/Klocation$BAR"
-
-\
-\
-\
-
-config I
-    int
-    range A 0
-    range 0 A
-    range 0 1 if A
+config MULTI_DEF

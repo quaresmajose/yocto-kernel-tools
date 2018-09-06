@@ -75,6 +75,26 @@ config OPT_4
     tristate "OPT_4"
 endchoice
 
+choice DEFAULTS_NOT_VISIBLE
+    bool "defaults not visible"
+    # Skipped due to condition
+    default OPT_6 if n
+    # Skipped because OPT_7 is not visible
+    default OPT_7
+    # This one should apply
+    default OPT_8
+config OPT_5
+    tristate "OPT_5"
+config OPT_6
+    tristate "OPT_6"
+config OPT_7
+    tristate "OPT_7" if n
+config OPT_8
+    tristate "OPT_8"
+config OPT_9
+    tristate "OPT_9"
+endchoice
+
 # Choices without an explicitly specified type should get the type of the first
 # symbol with a type
 
@@ -110,4 +130,69 @@ choice MISSING_MEMBER_TYPES_2
 config MMT_4
 config MMT_5
     bool
+endchoice
+
+# Choice where the default selection (the first symbol) depends on another
+# symbol. If that symbol becomes 'n', the default selection should change to
+# the first visible symbol in the choice.
+
+choice DEFAULT_WITH_DEP
+    bool "default with dep"
+
+config A
+    bool "A"
+    depends on DEP
+
+config B
+    bool "B"
+
+endchoice
+
+config DEP
+    bool "dep"
+
+# Choice with symbols that shouldn't be considered choice symbols because they
+# depend on the preceding symbol. This might be a kconfig bug, but some things
+# use it, so we need to emulate it.
+
+choice WEIRD_SYMS
+    bool "weird symbols that aren't considered part of the choice"
+
+# Only WS1 is part of the choice
+config WS1
+    bool "WS1"
+
+config WS2
+    bool "WS2"
+    depends on WS1
+
+config WS3
+    bool
+    depends on WS2
+
+config WS4
+    bool
+    depends on WS1
+
+config WS5
+    bool "WS5" if WS1
+
+# 'if' has the same effect, so only WS6 is part of the choice
+config WS6
+    bool "WS6"
+
+if WS6
+
+config WS7
+    bool
+
+config WS8
+    bool "WS8"
+
+endif
+
+# Should also be part of the choice
+config WS9
+    bool "WS9"
+
 endchoice

@@ -1,182 +1,187 @@
-# This is a test suite for Kconfiglib. It runs selftests on Kconfigs provided
-# by us and tests compatibility with the C Kconfig implementation by comparing
-# the output of Kconfiglib with the output of the scripts/kconfig/*conf
-# utilities for different targets and defconfigs. It should be run from the
-# top-level kernel directory with
+# Copyright (c) 2011-2018, Ulf Magnusson
+# SPDX-License-Identifier: ISC
+
+# This is the Kconfiglib test suite. It runs selftests on Kconfigs provided by
+# us and tests compatibility with the C Kconfig implementation by comparing the
+# output of Kconfiglib with the output of the scripts/kconfig/*conf utilities
+# for different targets and defconfigs. It should be run from the top-level
+# kernel directory with
 #
-#  $ python Kconfiglib/testsuite.py
+#   $ python Kconfiglib/testsuite.py
 #
-# Some additional options can be turned on by passing arguments. With no argument,
-# they default to off.
-#
-#  - speedy:
-#    Run scripts/kconfig/conf directly when comparing outputs instead of using
-#    'make' targets. Makes things a lot faster, but could break if Kconfig
-#    files start depending on additional environment variables besides ARCH and
-#    SRCARCH. (These would be set in the Makefiles in that case.) Safe as of
-#    Linux 4.1.0-rc8.
+# Some additional options can be turned on by passing them as arguments. They
+# default to off.
 #
 #  - obsessive:
-#    By default, only valid arch/defconfig pairs will be tested. With this
-#    enabled, every arch will be tested with every defconfig, which increases
-#    the test time by an order of magnitude. Occasionally finds (usually very
-#    obscure) bugs, and I make sure everything passes with it.
+#    By default, only valid arch/defconfig pairs are tested. In obsessive mode,
+#    every arch will be tested with every defconfig. Increases the testing time
+#    by an order of magnitude. Occasionally finds (usually obscure) bugs, and I
+#    make sure everything passes with it.
+#
+#  - obsessive-min-config:
+#    Like obsessive, for the minimal configuation (defconfig) tests.
 #
 #  - log:
-#    Log timestamped failures of the defconfig test to test_defconfig_fails in
-#    the root. Especially handy in obsessive mode.
+#    Log timestamped defconfig test failures to the file test_defconfig_fails.
+#    Handy in obsessive mode.
 #
-# For example, to run in speedy mode with logging, run
+# For example, this commands runs the test suite in obsessive mode with logging
+# enabled:
 #
-#  $ python Kconfiglib/testsuite.py speedy log
+#   $ python(3) Kconfiglib/testsuite.py obsessive log
 #
-# (PyPy also works, and runs the defconfig tests roughly 20% faster on my
-# machine. Some of the other tests get an even greater speed-up.)
-#
-# The tests have been roughly arranged in order of time needed.
+# pypy works too, and runs most tests much faster than CPython.
 #
 # All tests should pass. Report regressions to ulfalizer a.t Google's email
 # service.
 
-from __future__ import print_function
-
-import kconfiglib
+from kconfiglib import Kconfig, Symbol, Choice, COMMENT, MENU, MenuNode, \
+                       BOOL, TRISTATE, HEX, STRING, \
+                       TRI_TO_STR, \
+                       escape, unescape, \
+                       expr_str, expr_value, expr_items, split_expr, \
+                       _ordered_unique, \
+                       OR, AND, \
+                       KconfigError
+import difflib
+import errno
 import os
+import platform
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
-import time
 
-speedy_mode = False
-obsessive_mode = False
-log_mode = False
+def shell(cmd):
+    with open(os.devnull, "w") as devnull:
+        subprocess.call(cmd, shell=True, stdout=devnull, stderr=devnull)
 
-# Assign this to avoid warnings from Kconfiglib. Nothing in the kernel's
-# Kconfig files seems to actually look at the value as of 3.7.0-rc8. This is
-# only relevant for the test suite, as this will get set by the kernel Makefile
-# when using (i)scriptconfig.
-os.environ["KERNELVERSION"] = "3.7.0"
+all_passed = True
+
+def fail(msg=None):
+    global all_passed
+    all_passed = False
+    if msg is not None:
+        print("fail: " + msg)
+
+def verify(cond, msg):
+    if not cond:
+        fail(msg)
+
+def verify_equal(x, y):
+    if x != y:
+        fail("'{}' does not equal '{}'".format(x, y))
 
 # Prevent accidental loading of configuration files by removing
 # KCONFIG_ALLCONFIG from the environment
 os.environ.pop("KCONFIG_ALLCONFIG", None)
 
-# Number of arch/defconfig pairs tested so far
-nconfigs = 0
+obsessive = False
+obsessive_min_config = False
+log = False
 
 def run_tests():
-    global speedy_mode, obsessive_mode, log_mode
+    global obsessive, log
     for s in sys.argv[1:]:
-        if s == "speedy":
-            speedy_mode = True
-            print("Speedy mode enabled")
-        elif s == "obsessive":
-            obsessive_mode = True
+        if s == "obsessive":
+            obsessive = True
             print("Obsessive mode enabled")
+        elif s == "obsessive-min-config":
+            obsessive_min_config = True
+            print("Obsessive minimal config mode enabled")
         elif s == "log":
-            log_mode = True
+            log = True
             print("Log mode enabled")
         else:
-            print("Unrecognized option '{0}'".format(s))
-
+            print("Unrecognized option '{}'".format(s))
             return
 
     run_selftests()
     run_compatibility_tests()
 
 def run_selftests():
-    """Runs tests on specific configurations provided by us."""
-
     #
-    # Helper functions
+    # Common helper functions. These all expect 'c' to hold the current
+    # configuration.
     #
 
     def verify_value(sym_name, val):
-        """Verifies that a symbol has a particular value."""
-        sym = c[sym_name]
-        sym_val = sym.get_value()
-        verify(sym_val == val,
-               "{0} should have the value '{1}' but has the value '{2}'"
-               .format(sym_name, val, sym_val))
+        """
+        Verifies that a symbol has a particular value.
+        """
+        if isinstance(val, int):
+            val = TRI_TO_STR[val]
 
-    def assign_and_verify_new_value(sym_name, user_val, new_val):
-        """Assigns a user value to the symbol and verifies the new value."""
-        sym = c[sym_name]
-        sym_old_val = sym.get_value()
-        sym.set_user_value(user_val)
-        sym_new_val = sym.get_value()
-        verify(sym_new_val == new_val,
-               "{0} should have the new value '{1}' after being assigned the "
-               "user value '{2}'. Instead, the value is '{3}'. The old "
-               "value was '{4}'."
-               .format(sym_name, new_val, user_val, sym_new_val, sym_old_val))
+        sym = c.syms[sym_name]
+        verify(sym.str_value == val,
+               'expected {} to have the value "{}", had the value "{}"'
+               .format(sym_name, val, sym.str_value))
 
-    def assign_and_verify_new_user_value(sym_name, user_val, new_user_val):
-        """Assigns a user value to the symbol and verifies the new user
-        value."""
-        sym = c[sym_name]
-        sym_old_user_val = sym.get_user_value()
-        sym.set_user_value(user_val)
-        sym_new_user_val = sym.get_user_value()
-        verify(sym_new_user_val == new_user_val,
-               "{0} should have the user value '{1}' after being assigned "
-               "the user value '{2}'. Instead, the new user value was '{3}'. "
-               "The old user value was '{4}'."
-               .format(sym_name, new_user_val, user_val, sym_new_user_val,
-                       sym_old_user_val))
+    def assign_and_verify_value(sym_name, val, new_val):
+        """
+        Assigns 'val' to a symbol and verifies that its value becomes
+        'new_val'. Assumes (and tests) that 'val' is valid for the
+        symbol type.
+        """
+        if isinstance(new_val, int):
+            new_val = TRI_TO_STR[new_val]
 
-    print("Running selftests...\n")
+        sym = c.syms[sym_name]
+        old_val = sym.str_value
+        verify(sym.set_value(val),
+               "assigning '{}' to {} unexpectedly failed"
+               .format(val, sym_name))
+        verify(sym.str_value == new_val,
+               "expected {} to have the value '{}' after being assigned the "
+               "value '{}'. Instead, the value is '{}'. The old value was "
+               "'{}'."
+               .format(sym_name, new_val, val, sym.str_value, old_val))
 
-    print("Testing tristate comparisons...")
+    def assign_and_verify(sym_name, user_val):
+        """
+        Like assign_and_verify_value(), with the expected value being the
+        value just set.
+        """
+        assign_and_verify_value(sym_name, user_val, user_val)
 
-    def verify_truth_table(comp_fn, *bools):
-        bools_list = list(bools)
-        for (x, y) in (("n", "n"), ("n", "m"), ("n", "y"),
-                       ("m", "n"), ("m", "m"), ("m", "y"),
-                       ("y", "n"), ("y", "m"), ("y", "y")):
-            expected = bools_list.pop(0)
-            verify(comp_fn(x, y) == expected,
-                   "Expected {0} on ('{1}', '{2}') to be {3}".
-                   format(comp_fn, x, y, expected))
+    def assign_and_verify_user_value(sym_name, val, user_val, valid):
+        """
+        Assigns a user value to the symbol and verifies the new user value. If
+        valid is True, the user value is valid for the type, otherwise not.
+        This is used to test the set_value() return value.
+        """
+        sym = c.syms[sym_name]
+        sym_old_user_val = sym.user_value
 
-    verify_truth_table(kconfiglib.tri_less,
-                       False, True, True,
-                       False, False, True,
-                       False, False, False)
-
-    verify_truth_table(kconfiglib.tri_less_eq,
-                       True, True, True,
-                       False, True, True,
-                       False, False, True)
-
-    verify_truth_table(kconfiglib.tri_greater,
-                       False, False, False,
-                       True, False, False,
-                       True, True, False)
-
-    verify_truth_table(kconfiglib.tri_greater_eq,
-                       True, False, False,
-                       True, True, False,
-                       True, True, True)
+        verify(sym.set_value(val) == valid,
+               "expected the user value '{}' to be {} for {}, was not"
+               .format(val, "valid" if valid else "invalid", sym_name))
+        verify(sym.user_value == user_val,
+               "the assigned user value '{}' wasn't reflected in user_value "
+               "on the symbol {}. Instead, the new user_value was '{}'. The "
+               "old user value was '{}'."
+               .format(user_val, sym_name, sym.user_value, sym_old_user_val))
 
     #
-    # String literal lexing. (This tests an internal API.)
+    # Selftests
     #
 
-    print("Testing string literal (constant symbol) lexing...")
+    print("Testing string literal lexing")
 
-    c = kconfiglib.Config("Kconfiglib/tests/empty")
+    # Dummy empty configuration just to get a Kconfig object
+    c = Kconfig("Kconfiglib/tests/empty")
 
-    def verify_string_lex(s, res):
-        """Verifies that the string token 'res' is produced from lexing 's'.
-        Strips the first and last characters from 's' so we can use readable
-        raw strings as input."""
-        s = s[1:-1]
-        s_res = c._tokenize(s, for_eval = True).get_next()
-        verify(s_res == res,
-               "'{0}' produced the string token '{1}'. Expected '{2}'."
-               .format(s, s_res, res))
+    def verify_string_lex(s, expected):
+        """
+        Verifies that a constant symbol with the name 'res' is produced from
+        lexing 's'
+        """
+        res = c._tokenize("if " + s)[1].name
+        verify(res == expected,
+               "expected <{}> to produced the constant symbol <{}>, "
+               'produced <{}>'.format(s[1:-1], expected, res))
 
     verify_string_lex(r""" "" """, "")
     verify_string_lex(r""" '' """, "")
@@ -207,16 +212,17 @@ def run_selftests():
     verify_string_lex(r""" '\a\\"\b\c\'"d' """, "a\\\"bc'\"d")
 
     def verify_string_bad(s):
-        """Verifies that tokenizing 's' throws a Kconfig_Syntax_Error. Strips
-        the first and last characters from 's' so we can use readable raw
-        strings as input."""
-        s = s[1:-1]
+        """
+        Verifies that tokenizing 's' throws a KconfigError. Strips the first
+        and last characters from 's' so we can use readable raw strings as
+        input.
+        """
         try:
-            c._tokenize(s, for_eval = True)
-        except kconfiglib.Kconfig_Syntax_Error:
+            c.eval_string(s)
+        except KconfigError:
             pass
         else:
-            fail("Tokenization of '{0}' should have failed.".format(s))
+            fail("expected tokenization of {} to fail, didn't".format(s[1:-1]))
 
     verify_string_bad(r""" " """)
     verify_string_bad(r""" ' """)
@@ -227,186 +233,238 @@ def run_selftests():
     verify_string_bad(r""" "foo """)
     verify_string_bad(r""" 'foo """)
 
-    #
-    # is_modifiable()
-    #
 
-    print("Testing is_modifiable() and range queries...")
+    print("Testing escape() and unescape()")
 
-    c = kconfiglib.Config("Kconfiglib/tests/Kmodifiable")
+    def verify_escape_unescape(s, sesc):
+        # Verify that 's' escapes to 'sesc' and that 'sesc' unescapes to 's'
+        verify_equal(escape(s), sesc)
+        verify_equal(unescape(sesc), s)
 
-    for sym_name in ("VISIBLE", "TRISTATE_SELECTED_TO_M", "VISIBLE_STRING",
-                     "VISIBLE_INT", "VISIBLE_HEX"):
-        sym = c[sym_name]
-        verify(sym.is_modifiable(),
-               "{0} should be modifiable".format(sym_name))
+    verify_escape_unescape(r''          , r''              )
+    verify_escape_unescape(r'foo'       , r'foo'           )
+    verify_escape_unescape(r'"'         , r'\"'            )
+    verify_escape_unescape(r'""'        , r'\"\"'          )
+    verify_escape_unescape('\\'         , r'\\'            )
+    verify_escape_unescape(r'\\'        , r'\\\\'          )
+    verify_escape_unescape(r'\"'        , r'\\\"'          )
+    verify_escape_unescape(r'"ab\cd"ef"', r'\"ab\\cd\"ef\"')
 
-    for sym_name in ("n", "m", "y", "NOT_VISIBLE", "SELECTED_TO_Y",
-                     "BOOL_SELECTED_TO_M", "M_VISIBLE_TRISTATE_SELECTED_TO_M",
-                     "NOT_VISIBLE_STRING", "NOT_VISIBLE_INT", "NOT_VISIBLE_HEX"):
-        sym = c[sym_name]
-        verify(not sym.is_modifiable(),
-               "{0} should not be modifiable".format(sym_name))
+    # Backslashes before any character should be unescaped, not just before "
+    # and \
+    verify_equal(unescape(r"\afoo\b\c\\d\\\e\\\\f"), r"afoobc\d\e\\f")
 
-    #
-    # get_lower/upper_bound() and get_assignable_values()
-    #
 
-    c = kconfiglib.Config("Kconfiglib/tests/Kbounds")
+    print("Testing _ordered_unique()")
 
-    def verify_bounds(sym_name, low, high):
-        sym = c[sym_name]
-        sym_low = sym.get_lower_bound()
-        sym_high = sym.get_upper_bound()
-        verify(sym_low == low and sym_high == high,
-               "Incorrectly calculated bounds for {0}: {1}-{2}. "
-               "Expected {3}-{4}.".format(sym_name, sym_low, sym_high,
-                                          low, high))
-        # See that we get back the corresponding range from
-        # get_assignable_values()
-        if sym_low is None:
-            vals = sym.get_assignable_values()
-            verify(vals == [],
-                   "get_assignable_values() thinks there should be assignable "
-                   "values for {0} ({1}) but not get_lower/upper_bound()".
-                   format(sym_name, vals))
-            if sym.get_type() in (kconfiglib.BOOL, kconfiglib.TRISTATE):
-                verify(not sym.is_modifiable(),
-                       "get_lower_bound() thinks there should be no "
-                       "assignable values for the bool/tristate {0} but "
-                       "is_modifiable() thinks it should be modifiable".
-                       format(sym_name))
-        else:
-            tri_to_int = { "n" : 0, "m" : 1, "y" : 2 }
-            bound_range = ["n", "m", "y"][tri_to_int[sym_low] :
-                                          tri_to_int[sym_high] + 1]
-            assignable_range = sym.get_assignable_values()
-            verify(bound_range == assignable_range,
-                   "get_lower/upper_bound() thinks the range for {0} should "
-                   "be {1} while get_assignable_values() thinks it should be "
-                   "{2}".format(sym_name, bound_range, assignable_range))
-            if sym.get_type() in (kconfiglib.BOOL, kconfiglib.TRISTATE):
-                verify(sym.is_modifiable(),
-                       "get_lower/upper_bound() thinks the range for the "
-                       "bool/tristate {0} should be {1} while is_modifiable() "
-                       "thinks the symbol should not be modifiable".
-                       format(sym_name, bound_range))
+    verify_equal(_ordered_unique([]), [])
+    verify_equal(_ordered_unique([1]), [1])
+    verify_equal(_ordered_unique([1, 2]), [1, 2])
+    verify_equal(_ordered_unique([1, 1]), [1])
+    verify_equal(_ordered_unique([1, 1, 2]), [1, 2])
+    verify_equal(_ordered_unique([1, 2, 1]), [1, 2])
+    verify_equal(_ordered_unique([1, 2, 2]), [1, 2])
+    verify_equal(_ordered_unique([1, 2, 3, 2, 1, 2, 3, 4, 3, 2, 1, 0]),
+                                 [1, 2, 3, 4, 0])
 
-    verify_bounds("n", None, None)
-    verify_bounds("m", None, None)
-    verify_bounds("y", None, None)
-    verify_bounds("Y_VISIBLE_BOOL", "n", "y")
-    verify_bounds("Y_VISIBLE_TRISTATE", "n", "y")
-    verify_bounds("M_VISIBLE_BOOL", "n", "y")
-    verify_bounds("M_VISIBLE_TRISTATE", "n", "m")
-    verify_bounds("Y_SELECTED_BOOL", None, None)
-    verify_bounds("M_SELECTED_BOOL", None, None)
-    verify_bounds("Y_SELECTED_TRISTATE", None, None)
-    verify_bounds("M_SELECTED_TRISTATE", "m", "y")
-    verify_bounds("M_SELECTED_M_VISIBLE_TRISTATE", None, None)
-    verify_bounds("STRING", None, None)
-    verify_bounds("INT", None, None)
-    verify_bounds("HEX", None, None)
 
-    #
-    # eval()
-    #
+    print("Testing expression evaluation")
 
-    print("Testing eval()...")
-
-    c = kconfiglib.Config("Kconfiglib/tests/Keval")
+    c = Kconfig("Kconfiglib/tests/Keval", warn=False)
 
     def verify_eval(expr, val):
-        res = c.eval(expr)
+        res = c.eval_string(expr)
         verify(res == val,
-               "'{0}' evaluated to {1}, expected {2}".format(expr, res, val))
-
-    def verify_eval_bad(expr):
-        try:
-            c.eval(expr)
-        except kconfiglib.Kconfig_Syntax_Error:
-            pass
-        else:
-            fail('eval("{0}") should throw Kconfig_Syntax_Error'
-                 .format(expr))
+               "'{}' evaluated to {}, expected {}".format(expr, res, val))
 
     # No modules
-    verify_eval("n", "n")
-    verify_eval("m", "n")
-    verify_eval("y", "y")
-    verify_eval("'n'", "n")
-    verify_eval("'m'", "n")
-    verify_eval("'y'", "y")
-    verify_eval("M", "y")
+    verify_eval("n", 0)
+    verify_eval("m", 0)
+    verify_eval("y", 2)
+    verify_eval("'n'", 0)
+    verify_eval("'m'", 0)
+    verify_eval("'y'", 2)
+    verify_eval("M", 2)
+
     # Modules
-    c["MODULES"].set_user_value("y")
-    verify_eval("n", "n")
-    verify_eval("m", "m")
-    verify_eval("y", "y")
-    verify_eval("'n'", "n")
-    verify_eval("'m'", "m")
-    verify_eval("'y'", "y")
-    verify_eval("M", "m")
-    verify_eval("(Y || N) && (m && y)", "m")
+    c.modules.set_value(2)
+    verify_eval("n", 0)
+    verify_eval("m", 1)
+    verify_eval("y", 2)
+    verify_eval("'n'", 0)
+    verify_eval("'m'", 1)
+    verify_eval("'y'", 2)
+    verify_eval("M", 1)
+    verify_eval("(Y || N) && (m && y)", 1)
 
-    # Non-bool/non-tristate symbols are always "n" in a tristate sense
-    verify_eval("Y_STRING", "n")
-    verify_eval("Y_STRING || m", "m")
+    # Non-bool/non-tristate symbols are always n in a tristate sense
+    verify_eval("Y_STRING", 0)
+    verify_eval("Y_STRING || m", 1)
 
-    # As are all constants besides "y" and "m"
-    verify_eval('"foo"', "n")
-    verify_eval('"foo" || "bar"', "n")
+    # As are all constants besides y and m
+    verify_eval('"foo"', 0)
+    verify_eval('"foo" || "bar"', 0)
+    verify_eval('"foo" || m', 1)
 
     # Test equality for symbols
 
-    verify_eval("N = N", "y")
-    verify_eval("N = n", "y")
-    verify_eval("N = 'n'", "y")
-    verify_eval("N != N", "n")
-    verify_eval("N != n", "n")
-    verify_eval("N != 'n'", "n")
+    verify_eval("N = N", 2)
+    verify_eval("N = n", 2)
+    verify_eval("N = 'n'", 2)
+    verify_eval("N != N", 0)
+    verify_eval("N != n", 0)
+    verify_eval("N != 'n'", 0)
 
-    verify_eval("M = M", "y")
-    verify_eval("M = m", "y")
-    verify_eval("M = 'm'", "y")
-    verify_eval("M != M", "n")
-    verify_eval("M != m", "n")
-    verify_eval("M != 'm'", "n")
+    verify_eval("M = M", 2)
+    verify_eval("M = m", 2)
+    verify_eval("M = 'm'", 2)
+    verify_eval("M != M", 0)
+    verify_eval("M != m", 0)
+    verify_eval("M != 'm'", 0)
 
-    verify_eval("Y = Y", "y")
-    verify_eval("Y = y", "y")
-    verify_eval("Y = 'y'", "y")
-    verify_eval("Y != Y", "n")
-    verify_eval("Y != y", "n")
-    verify_eval("Y != 'y'", "n")
+    verify_eval("Y = Y", 2)
+    verify_eval("Y = y", 2)
+    verify_eval("Y = 'y'", 2)
+    verify_eval("Y != Y", 0)
+    verify_eval("Y != y", 0)
+    verify_eval("Y != 'y'", 0)
 
-    verify_eval("N != M", "y")
-    verify_eval("N != Y", "y")
-    verify_eval("M != Y", "y")
+    verify_eval("N != M", 2)
+    verify_eval("N != Y", 2)
+    verify_eval("M != Y", 2)
 
-    # string/int/hex
-    verify_eval("Y_STRING = y", "y")
-    verify_eval("Y_STRING = 'y'", "y")
-    verify_eval('FOO_BAR_STRING = "foo bar"', "y")
-    verify_eval('FOO_BAR_STRING != "foo bar baz"', "y")
-    verify_eval('INT_3 = 3', "y")
-    verify_eval("INT_3 = '3'", "y")
-    verify_eval('HEX_0X3 = 0x3', "y")
-    verify_eval("HEX_0X3 = '0x3'", "y")
+    verify_eval("Y_STRING = y", 2)
+    verify_eval("Y_STRING = 'y'", 2)
+    verify_eval('FOO_BAR_STRING = "foo bar"', 2)
+    verify_eval('FOO_BAR_STRING != "foo bar baz"', 2)
+    verify_eval('INT_37 = 37', 2)
+    verify_eval("INT_37 = '37'", 2)
+    verify_eval('HEX_0X37 = 0x37', 2)
+    verify_eval("HEX_0X37 = '0x37'", 2)
 
-    # Compare some constants...
-    verify_eval('"foo" != "bar"', "y")
-    verify_eval('"foo" = "bar"', "n")
-    verify_eval('"foo" = "foo"', "y")
+    # These should also hold after 31847b67 (kconfig: allow use of relations
+    # other than (in)equality)
+    verify_eval("HEX_0X37 = '0x037'", 2)
+    verify_eval("HEX_0X37 = '0x0037'", 2)
+
+    # Constant symbol comparisons
+    verify_eval('"foo" != "bar"', 2)
+    verify_eval('"foo" = "bar"', 0)
+    verify_eval('"foo" = "foo"', 2)
+
     # Undefined symbols get their name as their value
-    c.set_print_warnings(False)
-    verify_eval("'not_defined' = not_defined", "y")
-    verify_eval("not_defined_2 = not_defined_2", "y")
-    verify_eval("not_defined_1 != not_defined_2", "y")
+    c.disable_warnings()
+    verify_eval("'not_defined' = not_defined", 2)
+    verify_eval("not_defined_2 = not_defined_2", 2)
+    verify_eval("not_defined_1 != not_defined_2", 2)
 
-    # The C implementation's parser can be pretty lax about syntax. Kconfiglib
-    # sometimes needs to emulate that. Verify that some bad stuff throws
-    # Kconfig_Syntax_Error at least.
+    # Test less than/greater than
+
+    # Basic evaluation
+    verify_eval("INT_37 < 38", 2)
+    verify_eval("38 < INT_37", 0)
+    verify_eval("INT_37 < '38'", 2)
+    verify_eval("'38' < INT_37", 0)
+    verify_eval("INT_37 < 138", 2)
+    verify_eval("138 < INT_37", 0)
+    verify_eval("INT_37 < '138'", 2)
+    verify_eval("'138' < INT_37", 0)
+    verify_eval("INT_37 < -138", 0)
+    verify_eval("-138 < INT_37", 2)
+    verify_eval("INT_37 < '-138'", 0)
+    verify_eval("'-138' < INT_37", 2)
+    verify_eval("INT_37 < 37", 0)
+    verify_eval("37 < INT_37", 0)
+    verify_eval("INT_37 < 36", 0)
+    verify_eval("36 < INT_37", 2)
+
+    # Different formats in comparison
+    verify_eval("INT_37 < 0x26", 2) # 38
+    verify_eval("INT_37 < 0x25", 0) # 37
+    verify_eval("INT_37 < 0x24", 0) # 36
+    verify_eval("HEX_0X37 < 56", 2) # 0x38
+    verify_eval("HEX_0X37 < 55", 0) # 0x37
+    verify_eval("HEX_0X37 < 54", 0) # 0x36
+
+    # Other int comparisons
+    verify_eval("INT_37 <= 38", 2)
+    verify_eval("INT_37 <= 37", 2)
+    verify_eval("INT_37 <= 36", 0)
+    verify_eval("INT_37 >  38", 0)
+    verify_eval("INT_37 >  37", 0)
+    verify_eval("INT_37 >  36", 2)
+    verify_eval("INT_37 >= 38", 0)
+    verify_eval("INT_37 >= 37", 2)
+    verify_eval("INT_37 >= 36", 2)
+
+    # Other hex comparisons
+    verify_eval("HEX_0X37 <= 0x38", 2)
+    verify_eval("HEX_0X37 <= 0x37", 2)
+    verify_eval("HEX_0X37 <= 0x36", 0)
+    verify_eval("HEX_0X37 >  0x38", 0)
+    verify_eval("HEX_0X37 >  0x37", 0)
+    verify_eval("HEX_0X37 >  0x36", 2)
+    verify_eval("HEX_0X37 >= 0x38", 0)
+    verify_eval("HEX_0X37 >= 0x37", 2)
+    verify_eval("HEX_0X37 >= 0x36", 2)
+
+    # A hex holding a value without a "0x" prefix should still be treated as
+    # hexadecimal
+    verify_eval("HEX_37 < 0x38", 2)
+    verify_eval("HEX_37 < 0x37", 0)
+    verify_eval("HEX_37 < 0x36", 0)
+
+    # Symbol comparisons
+    verify_eval("INT_37   <  HEX_0X37", 2)
+    verify_eval("INT_37   >  HEX_0X37", 0)
+    verify_eval("HEX_0X37 <  INT_37  ", 0)
+    verify_eval("HEX_0X37 >  INT_37  ", 2)
+    verify_eval("INT_37   <  INT_37  ", 0)
+    verify_eval("INT_37   <= INT_37  ", 2)
+    verify_eval("INT_37   >  INT_37  ", 0)
+    verify_eval("INT_37   <= INT_37  ", 2)
+
+    # Tristate value comparisons
+    verify_eval("n < n", 0)
+    verify_eval("n < m", 2)
+    verify_eval("n < y", 2)
+    verify_eval("n < N", 0)
+    verify_eval("n < M", 2)
+    verify_eval("n < Y", 2)
+    verify_eval("0 > n", 0)
+    verify_eval("1 > n", 2)
+    verify_eval("2 > n", 2)
+    verify_eval("m < n", 0)
+    verify_eval("m < m", 0)
+    verify_eval("m < y", 2)
+
+    # Strings compare lexicographically
+    verify_eval("'aa' < 'ab'", 2)
+    verify_eval("'aa' > 'ab'", 0)
+    verify_eval("'ab' < 'aa'", 0)
+    verify_eval("'ab' > 'aa'", 2)
+
+    # Comparisons where one of the operands doesn't parse as a number also give
+    # a lexicographic comparison
+    verify_eval("INT_37 <  '37a' ", 2)
+    verify_eval("'37a'  >  INT_37", 2)
+    verify_eval("INT_37 <= '37a' ", 2)
+    verify_eval("'37a'  >= INT_37", 2)
+    verify_eval("INT_37 >= '37a' ", 0)
+    verify_eval("INT_37 >  '37a' ", 0)
+    verify_eval("'37a'  <  INT_37", 0)
+    verify_eval("'37a'  <= INT_37", 0)
+
+    def verify_eval_bad(expr):
+        try:
+            c.eval_string(expr)
+        except KconfigError:
+            pass
+        else:
+            fail('expected eval_string("{}") to throw KconfigError, '
+                 "didn't".format(expr))
+
+    # Verify that some bad stuff throws KconfigError's
     verify_eval_bad("")
     verify_eval_bad("&")
     verify_eval_bad("|")
@@ -415,664 +473,1070 @@ def run_selftests():
     verify_eval_bad(")")
     verify_eval_bad("=")
     verify_eval_bad("(X")
+    verify_eval_bad("X)")
+    verify_eval_bad("X X")
+    verify_eval_bad("!X X")
+    verify_eval_bad("X !X")
+    verify_eval_bad("(X) X")
     verify_eval_bad("X &&")
     verify_eval_bad("&& X")
+    verify_eval_bad("X && && X")
+    verify_eval_bad("X && !&&")
     verify_eval_bad("X ||")
     verify_eval_bad("|| X")
 
-    #
-    # Text queries
-    #
 
-    print("Testing text queries...")
+    print("Testing Symbol.__str__()/custom_str() and def_{int,hex,string}")
 
-    def verify_print(o, s):
-        verify_equals(str(o), textwrap.dedent(s[1:]))
+    def verify_str(item, s):
+        verify_equal(str(item), s[1:])
 
-    for var in ("ARCH", "SRCARCH", "srctree"):
-        os.environ.pop(var, None)
+    def verify_custom_str(item, s):
+        verify_equal(item.custom_str(lambda sc: "[{}]".format(sc.name)), s[1:])
 
-    # The tests below aren't meant to imply that the format is set in stone.
-    # It's just to verify that the strings do not change unexpectedly.
+    c = Kconfig("Kconfiglib/tests/Kstr", warn=False)
 
-    # Printing of Config
+    c.modules.set_value(2)
 
-    c = kconfiglib.Config("Kconfiglib/tests/Ktext")
+    verify_str(c.syms["UNDEFINED"], """
+""")
 
-    verify_print(c, """
-      Configuration
-      File                                   : Kconfiglib/tests/Ktext
-      Base directory                         : .
-      Value of $ARCH at creation time        : (not set)
-      Value of $SRCARCH at creation time     : (not set)
-      Source tree (derived from $srctree;
-      defaults to '.' if $srctree isn't set) : .
-      Most recently loaded .config           : (no .config loaded)
-      Print warnings                         : true
-      Print assignments to undefined symbols : false""")
+    verify_str(c.syms["BASIC_NO_PROMPT"], """
+config BASIC_NO_PROMPT
+	bool
+	help
+	  blah blah
+	  
+	    blah blah blah
+	  
+	   blah
+""")
 
-    os.environ["ARCH"] = "foo"
-    os.environ["SRCARCH"] = "bar"
-    os.environ["srctree"] = "baz"
+    verify_str(c.syms["BASIC_PROMPT"], """
+config BASIC_PROMPT
+	bool
+	prompt "basic"
+""")
 
-    c = kconfiglib.Config("Kconfiglib/tests/Ktext", base_dir = "foobar")
-    c.load_config("Kconfiglib/tests/empty")
-    c.set_print_warnings(False)
-    c.set_print_undef_assign(True)
+    verify_str(c.syms["ADVANCED"], """
+config ADVANCED
+	tristate
+	prompt "prompt" if DEP
+	default DEFAULT_1
+	default DEFAULT_2 if DEP
+	select SELECTED_1
+	select SELECTED_2 if DEP
+	imply IMPLIED_1
+	imply IMPLIED_2 if DEP
+	help
+	  first help text
 
-    verify_print(c, """
-      Configuration
-      File                                   : Kconfiglib/tests/Ktext
-      Base directory                         : foobar
-      Value of $ARCH at creation time        : foo
-      Value of $SRCARCH at creation time     : bar
-      Source tree (derived from $srctree;
-      defaults to '.' if $srctree isn't set) : baz
-      Most recently loaded .config           : Kconfiglib/tests/empty
-      Print warnings                         : false
-      Print assignments to undefined symbols : true""")
+config ADVANCED
+	tristate
+	prompt "prompt 2"
 
-    # Printing of Symbol
+menuconfig ADVANCED
+	tristate
+	prompt "prompt 3"
 
-    verify_print(c["BASIC"], """
-      Symbol BASIC
-      Type           : bool
-      Value          : "n"
-      User value     : (no user value)
-      Visibility     : "n"
-      Is choice item : false
-      Is defined     : true
-      Is from env.   : false
-      Is special     : false
-      Prompts:
-       (no prompts)
-      Default values:
-       (no default values)
-      Selects:
-       (no selects)
-      Reverse (select-related) dependencies:
-       (no reverse dependencies)
-      Additional dependencies from enclosing menus and ifs:
-       (no additional dependencies)
-      Locations: Kconfiglib/tests/Ktext:1""")
+config ADVANCED
+	tristate
+	depends on (A || !B || (C && D) || !(E && F) || G = H || (I && !J && (K || L) && !(M || N) && O = P)) && DEP4 && DEP3
+	help
+	  second help text
+""")
 
-    c["ADVANCED"].set_user_value("m")
+    verify_custom_str(c.syms["ADVANCED"], """
+config ADVANCED
+	tristate
+	prompt "prompt" if [DEP]
+	default [DEFAULT_1]
+	default [DEFAULT_2] if [DEP]
+	select [SELECTED_1]
+	select [SELECTED_2] if [DEP]
+	imply [IMPLIED_1]
+	imply [IMPLIED_2] if [DEP]
+	help
+	  first help text
 
-    verify_print(c["ADVANCED"], """
-      Symbol ADVANCED
-      Type           : tristate
-      Value          : "y"
-      User value     : "m"
-      Visibility     : "y"
-      Is choice item : false
-      Is defined     : true
-      Is from env.   : false
-      Is special     : false
-      Prompts:
-       "advanced prompt 1" if y || BASIC && BASIC (value: "y")
-       "advanced prompt 2"
-      Default values:
-       y (value: "y")
-        Condition: BASIC && !BASIC (value: "n")
-       n (value: "n")
-        Condition: BASIC = DUMMY (value: "n")
-      Selects:
-       SELECTED_1 if BASIC && DUMMY (value: "n")
-       SELECTED_2 if !(DUMMY || BASIC) (value: "y")
-      Reverse (select-related) dependencies:
-       SELECTING_1 && BASIC || SELECTING_2 && !BASIC (value: "n")
-      Additional dependencies from enclosing menus and ifs:
-       !BASIC && !BASIC (value: "y")
-      Locations: Kconfiglib/tests/Ktext:6 Kconfiglib/tests/Ktext:13""")
+config ADVANCED
+	tristate
+	prompt "prompt 2"
 
-    verify_print(c["HAS_RANGES"], """
-      Symbol HAS_RANGES
-      Type           : int
-      Value          : "1"
-      User value     : (no user value)
-      Visibility     : "y"
-      Is choice item : false
-      Is defined     : true
-      Is from env.   : false
-      Is special     : false
-      Ranges:
-       [1, 2] if !DUMMY (value: "y")
-       [INT, INT] if DUMMY (value: "n")
-       [123, 456]
-      Prompts:
-       "ranged"
-      Default values:
-       (no default values)
-      Selects:
-       (no selects)
-      Reverse (select-related) dependencies:
-       (no reverse dependencies)
-      Additional dependencies from enclosing menus and ifs:
-       (no additional dependencies)
-      Locations: Kconfiglib/tests/Ktext:29""")
+menuconfig ADVANCED
+	tristate
+	prompt "prompt 3"
 
-    # Printing of Choice
+config ADVANCED
+	tristate
+	depends on ([A] || ![B] || ([C] && [D]) || !([E] && [F]) || [G] = [H] || ([I] && ![J] && ([K] || [L]) && !([M] || [N]) && [O] = [P])) && [DEP4] && [DEP3]
+	help
+	  second help text
+""")
 
-    verify_print(c.get_choices()[0], """
-      Choice
-      Name (for named choices): (no name)
-      Type            : bool
-      Selected symbol : CHOICE_ITEM_1
-      User value      : (no user value)
-      Mode            : "y"
-      Visibility      : "y"
-      Optional        : false
-      Prompts:
-       "choice"
-      Defaults:
-       (no default values)
-      Choice symbols:
-       CHOICE_ITEM_1 CHOICE_ITEM_2 CHOICE_ITEM_3
-      Additional dependencies from enclosing menus and ifs:
-       (no additional dependencies)
-      Locations: Kconfiglib/tests/Ktext:35""")
 
-    c["CHOICE_ITEM_2"].set_user_value("y")
+    verify_str(c.syms["ONLY_DIRECT_DEPS"], """
+config ONLY_DIRECT_DEPS
+	int
+	depends on DEP1 && DEP2
+""")
 
-    verify_print(c.get_choices()[0], """
-      Choice
-      Name (for named choices): (no name)
-      Type            : bool
-      Selected symbol : CHOICE_ITEM_2
-      User value      : CHOICE_ITEM_2
-      Mode            : "y"
-      Visibility      : "y"
-      Optional        : false
-      Prompts:
-       "choice"
-      Defaults:
-       (no default values)
-      Choice symbols:
-       CHOICE_ITEM_1 CHOICE_ITEM_2 CHOICE_ITEM_3
-      Additional dependencies from enclosing menus and ifs:
-       (no additional dependencies)
-      Locations: Kconfiglib/tests/Ktext:35""")
+    verify_str(c.syms["STRING"], """
+config STRING
+	string
+	default "foo"
+	default "bar" if DEP
+	default STRING2
+	default STRING3 if DEP
+""")
 
-    # Printing of Menu
+    verify_str(c.syms["INT"], """
+config INT
+	int
+	range 1 2
+	range FOO BAR
+	range BAZ QAZ if DEP
+	default 7 if DEP
+""")
 
-    verify_print(c.get_menus()[0], """
-      Menu
-      Title                     : simple menu
-      'depends on' dependencies : (no dependencies)
-      'visible if' dependencies : (no dependencies)
-      Additional dependencies from enclosing menus and ifs:
-       (no additional dependencies)
-      Location: Kconfiglib/tests/Ktext:47""")
+    verify_str(c.syms["HEX"], """
+config HEX
+	hex
+	range 0x100 0x200
+	range FOO BAR
+	range BAZ QAZ if DEP
+	default 0x123
+""")
 
-    verify_print(c.get_menus()[1], """
-      Menu
-      Title                     : advanced menu
-      'depends on' dependencies : !BASIC (value: "y")
-      'visible if' dependencies : !DUMMY (value: "y")
-      Additional dependencies from enclosing menus and ifs:
-       !DUMMY (value: "y")
-      Location: Kconfiglib/tests/Ktext:51""")
+    verify_str(c.modules, """
+config MODULES
+	bool
+	prompt "MODULES"
+	option modules
+""")
 
-    # Printing of Comment
+    verify_str(c.syms["OPTIONS"], """
+config OPTIONS
+	option allnoconfig_y
+	option defconfig_list
+	option env="ENV"
+""")
 
-    verify_print(c.get_comments()[0], """
-      Comment
-      Text: simple comment
-      Dependencies: (no dependencies)
-      Additional dependencies from enclosing menus and ifs:
-       (no additional dependencies)
-      Location: Kconfiglib/tests/Ktext:57""")
+    verify_str(c.syms["CORRECT_PROP_LOCS_BOOL"], """
+config CORRECT_PROP_LOCS_BOOL
+	bool
+	prompt "prompt 1" if LOC_1
+	default DEFAULT_1 if LOC_1
+	default DEFAULT_2 if LOC_1
+	select SELECT_1 if LOC_1
+	select SELECT_2 if LOC_1
+	imply IMPLY_1 if LOC_1
+	imply IMPLY_2 if LOC_1
+	depends on LOC_1
+	help
+	  help 1
 
-    verify_print(c.get_comments()[1], """
-      Comment
-      Text: advanced comment
-      Dependencies: !BASIC (value: "y")
-      Additional dependencies from enclosing menus and ifs:
-       !DUMMY (value: "y")
-      Location: Kconfiglib/tests/Ktext:60""")
+menuconfig CORRECT_PROP_LOCS_BOOL
+	bool
+	prompt "prompt 2" if LOC_2
+	default DEFAULT_3 if LOC_2
+	default DEFAULT_4 if LOC_2
+	select SELECT_3 if LOC_2
+	select SELECT_4 if LOC_2
+	imply IMPLY_3 if LOC_2
+	imply IMPLY_4 if LOC_2
+	depends on LOC_2
+	help
+	  help 2
 
-    verify_equals(c["NO_HELP"].get_help(), None)
-    verify_equals(c["EMPTY_HELP"].get_help(), "")
-    verify_equals(c["HELP_TERMINATED_BY_COMMENT"].get_help(), "a\nb\nc\n")
-    verify_equals(c["TRICKY_HELP"].get_help(),
-                  "a\n b\n  c\n\n d\n  e\n   f\n\n\ng\n h\n  i\n")
-    verify_equals(c["S"].get_help(), "help for\nS\n")
-    verify_equals(c.get_choices()[1].get_help(), "help for\nC\n")
+config CORRECT_PROP_LOCS_BOOL
+	bool
+	prompt "prompt 3" if LOC_3
+	default DEFAULT_5 if LOC_3
+	default DEFAULT_6 if LOC_3
+	select SELECT_5 if LOC_3
+	select SELECT_6 if LOC_3
+	imply IMPLY_5 if LOC_3
+	imply IMPLY_6 if LOC_3
+	depends on LOC_3
+	help
+	  help 2
+""")
 
-    verify_equals(c["S"].get_name(), "S")
-    verify_equals(c.get_comments()[2].get_text(), "a comment")
-    verify_equals(c.get_menus()[2].get_title(), "a menu")
+    verify_str(c.syms["CORRECT_PROP_LOCS_INT"], """
+config CORRECT_PROP_LOCS_INT
+	int
+	range 1 2 if LOC_1
+	range 3 4 if LOC_1
+	depends on LOC_1
 
-    #
-    # Prompt queries
-    #
+config CORRECT_PROP_LOCS_INT
+	int
+	range 5 6 if LOC_2
+	range 7 8 if LOC_2
+	depends on LOC_2
+""")
 
-    print("Testing prompt queries...")
+    verify_custom_str(c.syms["CORRECT_PROP_LOCS_INT"], """
+config CORRECT_PROP_LOCS_INT
+	int
+	range [1] [2] if [LOC_1]
+	range [3] [4] if [LOC_1]
+	depends on [LOC_1]
 
-    def verify_prompts(sym_or_choice, prompts):
-        sym_or_choice_prompts = sym_or_choice.get_prompts()
-        verify(len(sym_or_choice_prompts) == len(prompts),
-               "Wrong number of prompts for " + sym_or_choice.get_name())
-        for i in range(0, len(sym_or_choice_prompts)):
-            verify(sym_or_choice_prompts[i] == prompts[i],
-                   "Prompt {0} wrong for {1}: Was '{2}', should be '{3}'".
-                   format(i, sym_or_choice.get_name(), sym_or_choice_prompts[i],
-                          prompts[i]))
+config CORRECT_PROP_LOCS_INT
+	int
+	range [5] [6] if [LOC_2]
+	range [7] [8] if [LOC_2]
+	depends on [LOC_2]
+""")
 
-    def verify_sym_prompts(sym_name, *prompts):
-        verify_prompts(c[sym_name], prompts)
 
-    def verify_choice_prompts(choice, *prompts):
-        verify_prompts(choice, prompts)
 
-    c = kconfiglib.Config("Kconfiglib/tests/Kprompt")
+    print("Testing Choice.__str__()/custom_str()")
 
-    # Symbols
-    verify_sym_prompts("NO_PROMPT")
-    verify_sym_prompts("SINGLE_PROMPT_1", "single prompt 1")
-    verify_sym_prompts("SINGLE_PROMPT_2", "single prompt 2")
-    verify_sym_prompts("MULTI_PROMPT", "prompt 1", "prompt 2", "prompt 3", "prompt 4")
+    verify_str(c.named_choices["CHOICE"], """
+choice CHOICE
+	tristate
+	prompt "foo"
+	default CHOICE_1
+	default CHOICE_2 if dep
+""")
 
-    no_prompt_choice, single_prompt_1_choice, single_prompt_2_choice, multi_prompt_choice = \
-      c.get_choices()
+    verify_str(c.named_choices["CHOICE"].nodes[0].next.item, """
+choice
+	tristate
+	prompt "no name"
+	optional
+""")
 
-    # Choices
-    verify_choice_prompts(no_prompt_choice)
-    verify_choice_prompts(single_prompt_1_choice, "single prompt 1 choice")
-    verify_choice_prompts(single_prompt_2_choice, "single prompt 2 choice")
-    verify_choice_prompts(multi_prompt_choice,
-      "prompt 1 choice", "prompt 2 choice", "prompt 3 choice")
+    verify_str(c.named_choices["CORRECT_PROP_LOCS_CHOICE"], """
+choice CORRECT_PROP_LOCS_CHOICE
+	bool
+	default CHOICE_3 if LOC_1
+	depends on LOC_1
 
-    #
-    # Location queries
-    #
+choice CORRECT_PROP_LOCS_CHOICE
+	bool
+	default CHOICE_4 if LOC_2
+	depends on LOC_2
 
-    print("Testing location queries...")
+choice CORRECT_PROP_LOCS_CHOICE
+	bool
+	default CHOICE_5 if LOC_3
+	depends on LOC_3
+""")
 
-    def verify_def_locations(sym_name, *locs):
-        sym_locs = c[sym_name].get_def_locations()
-        verify(len(sym_locs) == len(locs),
-               "Wrong number of def. locations for " + sym_name)
-        for i in range(0, len(sym_locs)):
-            verify(sym_locs[i] == locs[i],
-                   "Wrong def. location for {0}: Was {1}, should be {2}".
-                   format(sym_name, sym_locs[i], locs[i]))
+    verify_custom_str(c.named_choices["CORRECT_PROP_LOCS_CHOICE"], """
+choice CORRECT_PROP_LOCS_CHOICE
+	bool
+	default [CHOICE_3] if [LOC_1]
+	depends on [LOC_1]
+
+choice CORRECT_PROP_LOCS_CHOICE
+	bool
+	default [CHOICE_4] if [LOC_2]
+	depends on [LOC_2]
+
+choice CORRECT_PROP_LOCS_CHOICE
+	bool
+	default [CHOICE_5] if [LOC_3]
+	depends on [LOC_3]
+""")
+
+
+    print("Testing MenuNode.__str__()/custom_str() for menus and comments")
+
+    verify_str(c.syms["SIMPLE_MENU_HOOK"].nodes[0].next, """
+menu "simple menu"
+""")
+
+    verify_str(c.syms["ADVANCED_MENU_HOOK"].nodes[0].next, """
+menu "advanced menu"
+	depends on A
+	visible if B && (C || D)
+""")
+
+    verify_custom_str(c.syms["ADVANCED_MENU_HOOK"].nodes[0].next, """
+menu "advanced menu"
+	depends on [A]
+	visible if [B] && ([C] || [D])
+""")
+
+    verify_str(c.syms["SIMPLE_COMMENT_HOOK"].nodes[0].next, """
+comment "simple comment"
+""")
+
+    verify_str(c.syms["ADVANCED_COMMENT_HOOK"].nodes[0].next, """
+comment "advanced comment"
+	depends on A && B
+""")
+
+    verify_custom_str(c.syms["ADVANCED_COMMENT_HOOK"].nodes[0].next, """
+comment "advanced comment"
+	depends on [A] && [B]
+""")
+
+
+    print("Testing Symbol.__repr__()")
+
+    def verify_repr(item, s):
+        verify_equal(repr(item) + "\n", s[1:])
+
+    c = Kconfig("Kconfiglib/tests/Krepr", warn=False)
+
+    verify_repr(c.n, """
+<symbol n, tristate, value n, constant>
+""")
+
+    verify_repr(c.m, """
+<symbol m, tristate, value m, constant>
+""")
+
+    verify_repr(c.y, """
+<symbol y, tristate, value y, constant>
+""")
+
+    verify_repr(c.syms["UNDEFINED"], """
+<symbol UNDEFINED, unknown, value "UNDEFINED", visibility n, direct deps n, undefined>
+""")
+
+    verify_repr(c.syms["BASIC"], """
+<symbol BASIC, bool, value y, visibility n, direct deps y, Kconfiglib/tests/Krepr:9>
+""")
+
+    verify_repr(c.syms["VISIBLE"], """
+<symbol VISIBLE, bool, "visible", value n, visibility y, direct deps y, Kconfiglib/tests/Krepr:14>
+""")
+
+    c.syms["VISIBLE"].set_value(2)
+
+    verify_repr(c.syms["VISIBLE"], """
+<symbol VISIBLE, bool, "visible", value y, user value y, visibility y, direct deps y, Kconfiglib/tests/Krepr:14>
+""")
+
+    verify_repr(c.syms["DIR_DEP_N"], """
+<symbol DIR_DEP_N, unknown, value "DIR_DEP_N", visibility n, direct deps n, Kconfiglib/tests/Krepr:17>
+""")
+
+    verify_repr(c.syms["OPTIONS"], """
+<symbol OPTIONS, unknown, value "OPTIONS", visibility n, allnoconfig_y, is the defconfig_list symbol, from environment variable ENV, direct deps y, Kconfiglib/tests/Krepr:20>
+""")
+
+    verify_repr(c.syms["MULTI_DEF"], """
+<symbol MULTI_DEF, unknown, value "MULTI_DEF", visibility n, direct deps y, Kconfiglib/tests/Krepr:25, Kconfiglib/tests/Krepr:26>
+""")
+
+    verify_repr(c.syms["CHOICE_1"], """
+<symbol CHOICE_1, tristate, "choice sym", value n, visibility m, choice symbol, direct deps m, Kconfiglib/tests/Krepr:33>
+""")
+
+    verify_repr(c.modules, """
+<symbol MODULES, bool, value y, visibility n, is the modules symbol, direct deps y, Kconfiglib/tests/Krepr:1>
+""")
+
+
+    print("Testing Choice.__repr__()")
+
+    verify_repr(c.named_choices["CHOICE"], """
+<choice CHOICE, tristate, "choice", mode m, visibility y, Kconfiglib/tests/Krepr:30>
+""")
+
+    c.named_choices["CHOICE"].set_value(2)
+
+    verify_repr(c.named_choices["CHOICE"], """
+<choice CHOICE, tristate, "choice", mode y, user mode y, CHOICE_1 selected, visibility y, Kconfiglib/tests/Krepr:30>
+""")
+
+    c.syms["CHOICE_2"].set_value(2)
+
+    verify_repr(c.named_choices["CHOICE"], """
+<choice CHOICE, tristate, "choice", mode y, user mode y, CHOICE_2 selected, CHOICE_2 selected by user, visibility y, Kconfiglib/tests/Krepr:30>
+""")
+
+    c.named_choices["CHOICE"].set_value(1)
+
+    verify_repr(c.named_choices["CHOICE"], """
+<choice CHOICE, tristate, "choice", mode m, user mode m, CHOICE_2 selected by user (overridden), visibility y, Kconfiglib/tests/Krepr:30>
+""")
+
+    verify_repr(c.syms["CHOICE_HOOK"].nodes[0].next.item, """
+<choice, tristate, "optional choice", mode n, visibility n, optional, Kconfiglib/tests/Krepr:43>
+""")
+
+
+    print("Testing MenuNode.__repr__()")
+
+    verify_repr(c.syms["BASIC"].nodes[0], """
+<menu node for symbol BASIC, deps y, has help, has next, Kconfiglib/tests/Krepr:9>
+""")
+
+    verify_repr(c.syms["DIR_DEP_N"].nodes[0], """
+<menu node for symbol DIR_DEP_N, deps n, has next, Kconfiglib/tests/Krepr:17>
+""")
+
+    verify_repr(c.syms["MULTI_DEF"].nodes[0], """
+<menu node for symbol MULTI_DEF, deps y, has next, Kconfiglib/tests/Krepr:25>
+""")
+
+    verify_repr(c.syms["MULTI_DEF"].nodes[1], """
+<menu node for symbol MULTI_DEF, deps y, has next, Kconfiglib/tests/Krepr:26>
+""")
+
+    verify_repr(c.syms["MENUCONFIG"].nodes[0], """
+<menu node for symbol MENUCONFIG, is menuconfig, deps y, has next, Kconfiglib/tests/Krepr:28>
+""")
+
+    verify_repr(c.named_choices["CHOICE"].nodes[0], """
+<menu node for choice CHOICE, prompt "choice" (visibility y), deps y, has child, has next, Kconfiglib/tests/Krepr:30>
+""")
+
+    verify_repr(c.syms["CHOICE_HOOK"].nodes[0].next, """
+<menu node for choice, prompt "optional choice" (visibility n), deps y, has next, Kconfiglib/tests/Krepr:43>
+""")
+
+    verify_repr(c.syms["NO_VISIBLE_IF_HOOK"].nodes[0].next, """
+<menu node for menu, prompt "no visible if" (visibility y), deps y, 'visible if' deps y, has next, Kconfiglib/tests/Krepr:50>
+""")
+
+    verify_repr(c.syms["VISIBLE_IF_HOOK"].nodes[0].next, """
+<menu node for menu, prompt "visible if" (visibility y), deps y, 'visible if' deps m, has next, Kconfiglib/tests/Krepr:55>
+""")
+
+    verify_repr(c.syms["COMMENT_HOOK"].nodes[0].next, """
+<menu node for comment, prompt "comment" (visibility y), deps y, Kconfiglib/tests/Krepr:61>
+""")
+
+
+    print("Testing Kconfig.__repr__()")
+
+    verify_repr(c, """
+<configuration with 14 symbols, main menu prompt "Main menu", srctree is current directory, config symbol prefix "CONFIG_", warnings disabled, printing of warnings to stderr enabled, undef. symbol assignment warnings disabled, redundant symbol assignment warnings enabled>
+""")
+
+    os.environ["srctree"] = "Kconfiglib"
+    os.environ["CONFIG_"] = "CONFIG_ value"
+
+    c = Kconfig("tests/Krepr", warn=False)
+    c.enable_warnings()
+    c.disable_stderr_warnings()
+    c.disable_redun_warnings()
+    c.enable_undef_warnings()
+
+    verify_repr(c, """
+<configuration with 14 symbols, main menu prompt "Main menu", srctree "Kconfiglib", config symbol prefix "CONFIG_ value", warnings enabled, printing of warnings to stderr disabled, undef. symbol assignment warnings enabled, redundant symbol assignment warnings disabled>
+""")
+
+    os.environ.pop("srctree", None)
+    os.environ.pop("CONFIG_", None)
+
+
+    print("Testing tricky help strings")
+
+    c = Kconfig("Kconfiglib/tests/Khelp")
+
+    def verify_help(node, s):
+        verify_equal(node.help, s[1:])
+
+    verify_help(c.syms["TWO_HELP_STRINGS"].nodes[0], """
+first help string
+""")
+
+    verify_help(c.syms["TWO_HELP_STRINGS"].nodes[1], """
+second help string
+""")
+
+    verify_help(c.syms["NO_BLANK_AFTER_HELP"].nodes[0], """
+help for
+NO_BLANK_AFTER_HELP
+""")
+
+    verify_help(c.named_choices["CHOICE_HELP"].nodes[0], """
+help for
+CHOICE_HELP
+""")
+
+    verify_help(c.syms["HELP_TERMINATED_BY_COMMENT"].nodes[0], """
+a
+b
+c
+""")
+
+    verify_help(c.syms["TRICKY_HELP"].nodes[0], """
+a
+ b
+  c
+
+ d
+  e
+   f
+
+
+g
+ h
+  i
+""")
+
+
+    print("Testing locations, source/rsource/gsource/grsource, and "
+          "Kconfig.kconfig_filenames")
+
+    def verify_locations(nodes, *expected_locs):
+        verify(len(nodes) == len(expected_locs),
+               "Wrong number of locations for " + repr(nodes))
+
+        for node, expected_loc in zip(nodes, expected_locs):
+            node_loc = "{}:{}".format(node.filename, node.linenr)
+            verify(node_loc == expected_loc,
+                   "expected {} to have the location {}, had the location {}"
+                   .format(repr(node), expected_loc, node_loc))
 
     # Expanded in the 'source' statement in Klocation
-    os.environ["FOO"] = "tests"
 
-    c = kconfiglib.Config("Kconfiglib/tests/Klocation", base_dir = "Kconfiglib/")
+    os.environ["TESTS_DIR_FROM_ENV"] = "tests"
+    os.environ["SUB_DIR_FROM_ENV"] = "sub"
 
-    verify_def_locations("n")
-    verify_def_locations("m")
-    verify_def_locations("y")
+    os.environ["_SOURCED"] = "_sourced"
+    os.environ["_RSOURCED"] = "_rsourced"
+    os.environ["_GSOURCED"] = "_gsourced"
+    os.environ["_GRSOURCED"] = "_grsourced"
 
-    verify_def_locations("A",
-      ("Kconfiglib/tests/Klocation", 4),
-      ("Kconfiglib/tests/Klocation", 28),
-      ("Kconfiglib/tests/Klocation_included", 1),
-      ("Kconfiglib/tests/Klocation_included", 3))
-    verify_def_locations("C",
-      ("Kconfiglib/tests/Klocation", 18))
-    verify_def_locations("M",
-      ("Kconfiglib/tests/Klocation_included", 6))
-    verify_def_locations("N",
-      ("Kconfiglib/tests/Klocation_included", 17))
-    verify_def_locations("O",
-      ("Kconfiglib/tests/Klocation_included", 19))
-    verify_def_locations("NOT_DEFINED") # No locations
+    # Test twice, with $srctree as a relative and an absolute path,
+    # respectively
+    for srctree in "Kconfiglib", os.path.abspath("Kconfiglib"):
+        os.environ["srctree"] = srctree
 
-    def verify_ref_locations(sym_name, *locs):
-        sym_locs = c[sym_name].get_ref_locations()
-        verify(len(sym_locs) == len(locs),
-               "Wrong number of ref. locations for " + sym_name)
-        for i in range(0, len(sym_locs)):
-            verify(sym_locs[i] == locs[i],
-                   "Wrong ref. location for {0}: Was {1}, should be {2}".
-                   format(sym_name, sym_locs[i], locs[i]))
+        # Has symbol with empty help text, so disable warnings
+        c = Kconfig("tests/Klocation", warn=False)
 
-    # Reload without the slash at the end of 'base_dir' to get coverage for
-    # that as well
-    c = kconfiglib.Config("Kconfiglib/tests/Klocation", base_dir = "Kconfiglib")
+        verify_locations(c.syms["SINGLE_DEF"].nodes, "tests/Klocation:4")
 
-    verify_ref_locations("A",
-      ("Kconfiglib/tests/Klocation", 10),
-      ("Kconfiglib/tests/Klocation", 12),
-      ("Kconfiglib/tests/Klocation", 16),
-      ("Kconfiglib/tests/Klocation", 34),
-      ("Kconfiglib/tests/Klocation", 35),
-      ("Kconfiglib/tests/Klocation_included", 7),
-      ("Kconfiglib/tests/Klocation_included", 8),
-      ("Kconfiglib/tests/Klocation_included", 9),
-      ("Kconfiglib/tests/Klocation_included", 12),
-      ("Kconfiglib/tests/Klocation_included", 13),
-      ("Kconfiglib/tests/Klocation_included", 33),
-      ("Kconfiglib/tests/Klocation_included", 38),
-      ("Kconfiglib/tests/Klocation", 65),
-      ("Kconfiglib/tests/Klocation", 66),
-      ("Kconfiglib/tests/Klocation", 67))
-    verify_ref_locations("C")
-    verify_ref_locations("NOT_DEFINED",
-      ("Kconfiglib/tests/Klocation", 12),
-      ("Kconfiglib/tests/Klocation", 29),
-      ("Kconfiglib/tests/Klocation_included", 12),
-      ("Kconfiglib/tests/Klocation_included", 33),
-      ("Kconfiglib/tests/Klocation_included", 39))
+        verify_locations(c.syms["MULTI_DEF"].nodes,
+          "tests/Klocation:7",
+          "tests/Klocation:37",
+          "tests/Klocation_sourced:3",
+          "tests/sub/Klocation_rsourced:2",
+          "tests/sub/Klocation_gsourced1:1",
+          "tests/sub/Klocation_gsourced2:1",
+          "tests/sub/Klocation_gsourced1:1",
+          "tests/sub/Klocation_gsourced2:1",
+          "tests/sub/Klocation_grsourced1:1",
+          "tests/sub/Klocation_grsourced2:1",
+          "tests/sub/Klocation_grsourced1:1",
+          "tests/sub/Klocation_grsourced2:1",
+          "tests/Klocation:70")
 
-    # Location queries for choices
+        verify_locations(c.named_choices["CHOICE"].nodes,
+                         "tests/Klocation_sourced:5")
 
-    def verify_choice_locations(choice, *locs):
-        choice_locs = choice.get_def_locations()
-        verify(len(choice_locs) == len(locs),
-               "Wrong number of def. locations for choice")
-        for i in range(0, len(choice_locs)):
-            verify(choice_locs[i] == locs[i],
-                   "Wrong def. location for choice: Was {0}, should be {1}".
-                   format(choice_locs[i], locs[i]))
+        verify_locations([c.syms["MENU_HOOK"].nodes[0].next],
+                         "tests/Klocation_sourced:12")
 
-    choice_1, choice_2 = c.get_choices()
+        verify_locations([c.syms["COMMENT_HOOK"].nodes[0].next],
+                         "tests/Klocation_sourced:18")
 
-    # Throw in named choice test
-    verify(choice_1.get_name() == "B",
-           "The first choice should be called B")
-    verify(choice_2.get_name() is None,
-           "The second choice should have no name")
+        # Test Kconfig.kconfig_filenames
 
-    verify_choice_locations(choice_1,
-      ("Kconfiglib/tests/Klocation", 15),
-      ("Kconfiglib/tests/Klocation_included", 22))
-    verify_choice_locations(choice_2,
-      ("Kconfiglib/tests/Klocation_included", 15))
+        verify_equal(c.kconfig_filenames, [
+            "tests/Klocation",
+            "tests/Klocation_sourced",
+            "tests/sub/Klocation_rsourced",
+            "tests/sub/Klocation_gsourced1",
+            "tests/sub/Klocation_gsourced2",
+            "tests/sub/Klocation_gsourced1",
+            "tests/sub/Klocation_gsourced2",
+            "tests/sub/Klocation_grsourced1",
+            "tests/sub/Klocation_grsourced2",
+            "tests/sub/Klocation_grsourced1",
+            "tests/sub/Klocation_grsourced2"
+        ])
 
-    # Location queries for menus and comments
+        # Test recursive 'source' detection
 
-    def verify_location(menu_or_comment, loc):
-        menu_or_comment_loc = menu_or_comment.get_location()
-        verify(menu_or_comment_loc == loc,
-               "Wrong location for {0} with text '{1}': Was {2}, should be "
-               "{3}".format("menu" if menu_or_comment.is_menu() else "comment",
-                            menu_or_comment.get_title() if
-                              menu_or_comment.is_menu() else
-                              menu_or_comment.get_text(),
-                            menu_or_comment_loc,
-                            loc))
+        try:
+            Kconfig("tests/Krecursive1")
+        except KconfigError as e:
+            verify_equal(str(e), """
+tests/Krecursive2:1: Recursive 'source' of 'tests/Krecursive1' detected. Check that environment variables are set correctly.
+Include path:
+tests/Krecursive1:1
+tests/Krecursive2:1
+"""[:-1])
+        except:
+            fail("recursive 'source' raised wrong exception")
+        else:
+            fail("recursive 'source' did not raise exception")
 
-    menu_1, menu_2 = c.get_menus()[:-1]
-    comment_1, comment_2 = c.get_comments()
+        # Verify that source and rsource throw exceptions for missing files
 
-    verify_location(menu_1, ("Kconfiglib/tests/Klocation", 9))
-    verify_location(menu_2, ("Kconfiglib/tests/Klocation_included", 5))
-    verify_location(comment_1, ("Kconfiglib/tests/Klocation", 31))
-    verify_location(comment_2, ("Kconfiglib/tests/Klocation_included", 34))
+        # TODO: Make an exception test helper
 
-    #
-    # Visibility queries
-    #
+        try:
+            Kconfig("tests/Kmissingsource")
+        except KconfigError as e:
+            if "does not exist" not in str(e):
+                fail("'source' with missing file raised wrong KconfigError")
+        except:
+            fail("'source' with missing file raised wrong exception")
+        else:
+            fail("'source' with missing file did not raise exception")
 
-    print("Testing visibility queries...")
+        try:
+            Kconfig("tests/Kmissingrsource")
+        except KconfigError as e:
+            if "does not exist" not in str(e):
+                fail("'rsource' with missing file raised wrong KconfigError")
+        except:
+            fail("'rsource' with missing file raised wrong exception")
+        else:
+            fail("'rsource' with missing file did not raise exception")
 
-    c = kconfiglib.Config("Kconfiglib/tests/Kvisibility")
 
-    def verify_sym_visibility(sym_name, no_module_vis, module_vis):
-        sym = c[sym_name]
+    print("Testing Kconfig.node_iter()")
 
-        c["MODULES"].set_user_value("n")
-        sym_vis = sym.get_visibility()
-        verify(sym_vis == no_module_vis,
-               "{0} should have visibility '{1}' without modules, had "
-               "visibility '{2}'".
-               format(sym_name, no_module_vis, sym_vis))
+    # Reuse tests/Klocation. The node_iter(unique_syms=True) case already gets
+    # plenty of testing from write_config() as well.
 
-        c["MODULES"].set_user_value("y")
-        sym_vis = sym.get_visibility()
-        verify(sym_vis == module_vis,
-               "{0} should have visibility '{1}' with modules, had "
-               "visibility '{2}'".
-               format(sym_name, module_vis, sym_vis))
+    c = Kconfig("tests/Klocation", warn=False)
+
+    verify_equal(
+        [node.item.name for node in c.node_iter()
+         if isinstance(node.item, Symbol)],
+        ["SINGLE_DEF", "MULTI_DEF", "HELP_1", "HELP_2", "HELP_3", "MULTI_DEF",
+         "MULTI_DEF", "MENU_HOOK", "COMMENT_HOOK"] + 10*["MULTI_DEF"])
+
+    verify_equal(
+        [node.item.name for node in c.node_iter(True)
+         if isinstance(node.item, Symbol)],
+        ["SINGLE_DEF", "MULTI_DEF", "HELP_1", "HELP_2", "HELP_3", "MENU_HOOK",
+         "COMMENT_HOOK"])
+
+    verify_equal(
+        [node.prompt[0] for node in c.node_iter()
+         if not isinstance(node.item, Symbol)],
+        ["choice", "menu", "comment"])
+
+    verify_equal(
+        [node.prompt[0] for node in c.node_iter(True)
+         if not isinstance(node.item, Symbol)],
+        ["choice", "menu", "comment"])
+
+    # Get rid of custom 'srctree' from Klocation test
+    os.environ.pop("srctree", None)
+
+
+    print("Testing MenuNode.include_path")
+
+    os.environ["srctree"] = "Kconfiglib/tests"
+
+    c = Kconfig("Kinclude_path")
+
+    def verify_node_path(node, *expected):
+        if node.include_path != expected:
+            fail("Wrong include path for node {!r}. Got {}, expected {}."
+                 .format(node, node.include_path, expected))
+
+    def verify_sym_path(sym_name, node_i, *expected):
+        verify_node_path(c.syms[sym_name].nodes[node_i], *expected)
+
+    verify_sym_path("TOP", 0)
+    verify_sym_path("TOP", 1)
+    verify_sym_path("TOP", 2)
+
+    verify_sym_path("ONE_DOWN", 0, ("Kinclude_path", 4))
+    verify_sym_path("ONE_DOWN", 1, ("Kinclude_path", 4))
+    verify_sym_path("ONE_DOWN", 2, ("Kinclude_path", 4))
+    verify_sym_path("ONE_DOWN", 3, ("Kinclude_path", 9))
+    verify_sym_path("ONE_DOWN", 4, ("Kinclude_path", 9))
+    verify_sym_path("ONE_DOWN", 5, ("Kinclude_path", 9))
+
+    verify_sym_path("TWO_DOWN", 0,
+                    ("Kinclude_path", 4), ("Kinclude_path_sourced_1", 4))
+    verify_sym_path("TWO_DOWN", 1,
+                    ("Kinclude_path", 4), ("Kinclude_path_sourced_1", 9))
+    verify_sym_path("TWO_DOWN", 2,
+                    ("Kinclude_path", 9), ("Kinclude_path_sourced_1", 4))
+    verify_sym_path("TWO_DOWN", 3,
+                    ("Kinclude_path", 9), ("Kinclude_path_sourced_1", 9))
+
+    verify_node_path(c.top_node)
+    verify_node_path(c.menus[0], ("Kinclude_path", 4), ("Kinclude_path_sourced_1", 4))
+    verify_node_path(c.comments[0], ("Kinclude_path", 4), ("Kinclude_path_sourced_1", 4))
+    verify_node_path(c.choices[0].nodes[0], ("Kinclude_path", 4), ("Kinclude_path_sourced_1", 4))
+
+    os.environ.pop("srctree", None)
+
+
+    print("Testing Kconfig.choices/menus/comments")
+
+    c = Kconfig("Kconfiglib/tests/Kitemlists")
+
+    def verify_prompts(items, *expected_prompts):
+        verify(len(items) == len(expected_prompts),
+               "Wrong number of prompts for {}".format(items))
+
+        for item, expected_prompt in zip(items, expected_prompts):
+            if not isinstance(item, MenuNode):
+                item = item.nodes[0]
+
+            verify(item.prompt[0] == expected_prompt,
+                   "Wrong prompt for {}, expected '{}'"
+                   .format(repr(item), expected_prompt))
+
+    verify_prompts(c.choices, "choice 1", "choice 2", "choice 3")
+    verify_prompts(c.menus, "menu 1", "menu 2", "menu 3", "menu 4", "menu 5")
+    verify_prompts(c.comments, "comment 1", "comment 2", "comment 3")
+
+
+    print("Testing Symbol/Choice.direct_dep")
+
+    c = Kconfig("Kconfiglib/tests/Kdirdep")
+
+    verify_equal(expr_str(c.syms["NO_DEP_SYM"].direct_dep), '"y"')
+    verify_equal(expr_str(c.syms["DEP_SYM"].direct_dep), "A || (B && C) || !D")
+
+    verify_equal(expr_str(c.named_choices["NO_DEP_CHOICE"].direct_dep), '"y"')
+    verify_equal(expr_str(c.named_choices["DEP_CHOICE"].direct_dep),
+                 "A || B || C")
+
+
+    print("Testing expr_items()")
+
+    c = Kconfig("Kconfiglib/tests/Kexpr_items")
+
+    def verify_expr_items(expr, *sym_names):
+        verify_equal(tuple(sorted(item.name for item in expr_items(expr))),
+                     sym_names)
+
+    verify_expr_items(
+        c.syms["TEST"].defaults[0][0],
+        "A", "B", "C", "D", "E", "F", "G", "H"
+    )
+
+    verify_expr_items(
+        c.syms["TEST_CHOICE"].nodes[0].prompt[1],
+        "A", "CHOICE"
+    )
+
+
+    print("Testing MenuNode/Symbol/Choice.referenced")
+
+    c = Kconfig("Kconfiglib/tests/Kreferenced", warn=False)
+
+    def verify_deps(item, *dep_names):
+        verify_equal(tuple(sorted(item.name for item in item.referenced)),
+                     dep_names)
+
+    verify_deps(c.top_node, "y")
+
+    verify_deps(c.syms["NO_REFS"].nodes[0], "y")
+
+    verify_deps(c.syms["JUST_DEPENDS_ON_REFS"].nodes[0], "A", "B")
+
+    verify_deps(c.syms["LOTS_OF_REFS"].nodes[0],
+                *(chr(n) for n in range(ord("A"), ord("Z") + 1)))
+
+    verify_deps(c.syms["INT_REFS"].nodes[0],
+                "A", "B", "C", "D", "E", "F", "G", "H", "y")
+
+    verify_deps(c.syms["CHOICE_REF"].nodes[0], "CHOICE")
+
+    verify_deps(c.menus[0], "A", "B", "C", "D")
+
+    verify_deps(c.comments[0], "A", "B")
+
+    verify_deps(c.syms["MULTI_DEF_SYM"], "A", "B", "C", "y")
+    verify_deps(c.named_choices["MULTI_DEF_CHOICE"], "A", "B", "C")
+
+
+    print("Testing split_expr()")
+
+    c = Kconfig("Kconfiglib/tests/empty")
+    c.disable_warnings()
+
+    def verify_split(to_split, op, operand_strs):
+        # The same hackage as in Kconfig.eval_string()
+        c._tokens = c._tokenize("if " + to_split)[1:]
+        c._tokens_i = -1
+
+        operands = split_expr(c._parse_expr(False), op)
+
+        verify(len(operands) == len(operand_strs),
+               "Wrong number of operands when {} was split by {}"
+               .format(to_split, "OR" if op == OR else "AND"))
+
+        for operand, operand_str in zip(operands, operand_strs):
+            verify_equal(expr_str(operand), operand_str)
+
+    verify_split("A",                    OR, ("A",                ))
+    verify_split("!A",                   OR, ("!A",               ))
+    verify_split("A = B",                OR, ("A = B",            ))
+    verify_split("A && B",               OR, ("A && B",           ))
+    verify_split("A || B",               OR, ("A", "B"            ))
+    verify_split("(A || B) || C",        OR, ("A", "B", "C"       ))
+    verify_split("A || (B || C)",        OR, ("A", "B", "C"       ))
+    verify_split("A || !(B || C)",       OR, ("A", "!(B || C)"    ))
+    verify_split("A || (B && (C || D))", OR, ("A", "B && (C || D)"))
+    verify_split("(A && (B || C)) || D", OR, ("A && (B || C)", "D"))
+
+    verify_split("A",                    AND, ("A",                ))
+    verify_split("!A",                   AND, ("!A",               ))
+    verify_split("A = B",                AND, ("A = B",            ))
+    verify_split("A || B",               AND, ("A || B",           ))
+    verify_split("A && B",               AND, ("A", "B"            ))
+    verify_split("(A && B) && C",        AND, ("A", "B", "C"       ))
+    verify_split("A && (B && C)",        AND, ("A", "B", "C"       ))
+    verify_split("A && !(B && C)",       AND, ("A", "!(B && C)"    ))
+    verify_split("A && (B || (C && D))", AND, ("A", "B || (C && D)"))
+    verify_split("(A || (B && C)) && D", AND, ("A || (B && C)", "D"))
+
+
+    print("Testing visibility")
+
+    c = Kconfig("Kconfiglib/tests/Kvisibility")
+
+    def verify_visibility(item, no_module_vis, module_vis):
+        c.modules.set_value(0)
+        verify(item.visibility == no_module_vis,
+               "expected {} to have visibility {} without modules, had "
+               "visibility {}".
+               format(repr(item), no_module_vis, item.visibility))
+
+        c.modules.set_value(2)
+        verify(item.visibility == module_vis,
+               "expected {} to have visibility {} with modules, had "
+               "visibility {}".
+               format(repr(item), module_vis, item.visibility))
 
     # Symbol visibility
 
-    verify_sym_visibility("NO_PROMPT", "n", "n")
-    verify_sym_visibility("BOOL_n", "n", "n")
-    verify_sym_visibility("BOOL_m", "n", "y") # Promoted
-    verify_sym_visibility("BOOL_MOD", "y", "y") # Promoted
-    verify_sym_visibility("BOOL_y", "y", "y")
-    verify_sym_visibility("TRISTATE_m", "n", "m")
-    verify_sym_visibility("TRISTATE_MOD", "y", "m") # Promoted
-    verify_sym_visibility("TRISTATE_y", "y", "y")
-    verify_sym_visibility("BOOL_if_n", "n", "n")
-    verify_sym_visibility("BOOL_if_m", "n", "y") # Promoted
-    verify_sym_visibility("BOOL_if_y", "y", "y")
-    verify_sym_visibility("BOOL_menu_n", "n", "n")
-    verify_sym_visibility("BOOL_menu_m", "n", "y") # Promoted
-    verify_sym_visibility("BOOL_menu_y", "y", "y")
-    verify_sym_visibility("BOOL_choice_n", "n", "n")
-    verify_sym_visibility("BOOL_choice_m", "n", "y") # Promoted
-    verify_sym_visibility("BOOL_choice_y", "y", "y")
-    verify_sym_visibility("TRISTATE_if_n", "n", "n")
-    verify_sym_visibility("TRISTATE_if_m", "n", "m")
-    verify_sym_visibility("TRISTATE_if_y", "y", "y")
-    verify_sym_visibility("TRISTATE_menu_n", "n", "n")
-    verify_sym_visibility("TRISTATE_menu_m", "n", "m")
-    verify_sym_visibility("TRISTATE_menu_y", "y", "y")
-    verify_sym_visibility("TRISTATE_choice_n", "n", "n")
-    verify_sym_visibility("TRISTATE_choice_m", "n", "m")
-    verify_sym_visibility("TRISTATE_choice_y", "y", "y")
+    verify_visibility(c.syms["NO_PROMPT"],     0, 0)
+    verify_visibility(c.syms["BOOL_N"],        0, 0)
+    verify_visibility(c.syms["BOOL_M"],        0, 2)
+    verify_visibility(c.syms["BOOL_MOD"],      2, 2)
+    verify_visibility(c.syms["BOOL_Y"],        2, 2)
+    verify_visibility(c.syms["TRISTATE_M"],    0, 1)
+    verify_visibility(c.syms["TRISTATE_MOD"],  2, 1)
+    verify_visibility(c.syms["TRISTATE_Y"],    2, 2)
+    verify_visibility(c.syms["BOOL_IF_N"],     0, 0)
+    verify_visibility(c.syms["BOOL_IF_M"],     0, 2)
+    verify_visibility(c.syms["BOOL_IF_Y"],     2, 2)
+    verify_visibility(c.syms["BOOL_MENU_N"],   0, 0)
+    verify_visibility(c.syms["BOOL_MENU_M"],   0, 2)
+    verify_visibility(c.syms["BOOL_MENU_Y"],   2, 2)
+    verify_visibility(c.syms["BOOL_CHOICE_N"], 0, 0)
 
-    # Choice visibility
+    # Non-tristate symbols in tristate choices are only visible if the choice
+    # is in y mode
 
-    def verify_choice_visibility(choice, no_module_vis, module_vis):
-        c["MODULES"].set_user_value("n")
-        choice_vis = choice.get_visibility()
-        verify(choice_vis == no_module_vis,
-               "choice {0} should have visibility '{1}' without modules, "
-               "has visibility '{2}'".
-               format(choice.get_name(), no_module_vis, choice_vis))
+    # The choice can't be brought to y mode because of the 'if m'
+    verify_visibility(c.syms["BOOL_CHOICE_M"], 0, 0)
+    c.syms["BOOL_CHOICE_M"].choice.set_value(2)
+    verify_visibility(c.syms["BOOL_CHOICE_M"], 0, 0)
 
-        c["MODULES"].set_user_value("y")
-        choice_vis = choice.get_visibility()
-        verify(choice_vis == module_vis,
-               "choice {0} should have visibility '{1}' with modules, "
-               "has visibility '{2}'".
-               format(choice.get_name(), module_vis, choice_vis))
+    # The choice gets y mode only when running without modules, because it
+    # defaults to m mode
+    verify_visibility(c.syms["BOOL_CHOICE_Y"], 2, 0)
+    c.syms["BOOL_CHOICE_Y"].choice.set_value(2)
+    # When set to y mode, the choice symbol becomes visible both with and
+    # without modules
+    verify_visibility(c.syms["BOOL_CHOICE_Y"], 2, 2)
 
-    choice_bool_n, choice_bool_m, choice_bool_y, choice_tristate_n, \
-      choice_tristate_m, choice_tristate_y, choice_tristate_if_m_and_y, \
-      choice_tristate_menu_n_and_y \
-      = c.get_choices()[3:]
+    verify_visibility(c.syms["TRISTATE_IF_N"],     0, 0)
+    verify_visibility(c.syms["TRISTATE_IF_M"],     0, 1)
+    verify_visibility(c.syms["TRISTATE_IF_Y"],     2, 2)
+    verify_visibility(c.syms["TRISTATE_MENU_N"],   0, 0)
+    verify_visibility(c.syms["TRISTATE_MENU_M"],   0, 1)
+    verify_visibility(c.syms["TRISTATE_MENU_Y"],   2, 2)
+    verify_visibility(c.syms["TRISTATE_CHOICE_N"], 0, 0)
+    verify_visibility(c.syms["TRISTATE_CHOICE_M"], 0, 1)
+    verify_visibility(c.syms["TRISTATE_CHOICE_Y"], 2, 2)
 
-    verify(choice_bool_n.get_name() == "BOOL_CHOICE_n", "Ops - testing the wrong choices")
+    verify_visibility(c.named_choices["BOOL_CHOICE_N"],     0, 0)
+    verify_visibility(c.named_choices["BOOL_CHOICE_M"],     0, 2)
+    verify_visibility(c.named_choices["BOOL_CHOICE_Y"],     2, 2)
+    verify_visibility(c.named_choices["TRISTATE_CHOICE_N"], 0, 0)
+    verify_visibility(c.named_choices["TRISTATE_CHOICE_M"], 0, 1)
+    verify_visibility(c.named_choices["TRISTATE_CHOICE_Y"], 2, 2)
 
-    verify_choice_visibility(choice_bool_n, "n", "n")
-    verify_choice_visibility(choice_bool_m, "n", "y") # Promoted
-    verify_choice_visibility(choice_bool_y, "y", "y")
-    verify_choice_visibility(choice_tristate_n, "n", "n")
-    verify_choice_visibility(choice_tristate_m, "n", "m")
-    verify_choice_visibility(choice_tristate_y, "y", "y")
+    verify_visibility(c.named_choices["TRISTATE_CHOICE_IF_M_AND_Y"],   0, 1)
+    verify_visibility(c.named_choices["TRISTATE_CHOICE_MENU_N_AND_Y"], 0, 0)
 
-    verify_choice_visibility(choice_tristate_if_m_and_y, "n", "m")
-    verify_choice_visibility(choice_tristate_menu_n_and_y, "n", "n")
+    # Verify that 'visible if' visibility gets propagated to prompts
 
-    # Menu visibility
-
-    def verify_menu_visibility(menu, no_module_vis, module_vis):
-        c["MODULES"].set_user_value("n")
-        menu_vis = menu.get_visibility()
-        verify(menu_vis == no_module_vis,
-               "menu \"{0}\" should have visibility '{1}' without modules, "
-               "has visibility '{2}'".
-               format(menu.get_title(), no_module_vis, menu_vis))
-
-        c["MODULES"].set_user_value("y")
-        menu_vis = menu.get_visibility()
-        verify(menu_vis == module_vis,
-               "menu \"{0}\" should have visibility '{1}' with modules, "
-               "has visibility '{2}'".
-               format(menu.get_title(), module_vis, menu_vis))
-
-    menu_n, menu_m, menu_y, menu_if_n, menu_if_m, menu_if_y, \
-      menu_if_m_and_y = c.get_menus()[4:-5]
-    verify(menu_n.get_title() == "menu n", "Ops - testing the wrong menus")
-
-    verify_menu_visibility(menu_n, "n", "n")
-    verify_menu_visibility(menu_m, "n", "m")
-    verify_menu_visibility(menu_y, "y", "y")
-    verify_menu_visibility(menu_if_n, "n", "n")
-    verify_menu_visibility(menu_if_m, "n", "m")
-    verify_menu_visibility(menu_if_y, "y", "y")
-    verify_menu_visibility(menu_if_m_and_y, "n", "m")
-
-    # Menu 'visible if' visibility
-
-    menu_visible_if_n, menu_visible_if_m, menu_visible_if_y, \
-      menu_visible_if_m_2 = c.get_menus()[12:]
-
-    def verify_visible_if_visibility(menu, no_module_vis, module_vis):
-        c["MODULES"].set_user_value("n")
-        menu_vis = menu.get_visible_if_visibility()
-        verify(menu_vis == no_module_vis,
-               "menu \"{0}\" should have 'visible if' visibility '{1}' "
-               "without modules, has 'visible if' visibility '{2}'".
-               format(menu.get_title(), no_module_vis, menu_vis))
-
-        c["MODULES"].set_user_value("y")
-        menu_vis = menu.get_visible_if_visibility()
-        verify(menu_vis == module_vis,
-               "menu \"{0}\" should have 'visible if' visibility '{1}' "
-               "with modules, has 'visible if' visibility '{2}'".
-               format(menu.get_title(), module_vis, menu_vis))
-
-    # Ordinary visibility should not affect 'visible if' visibility
-    verify_visible_if_visibility(menu_n, "y", "y")
-    verify_visible_if_visibility(menu_if_n, "y", "y")
-    verify_visible_if_visibility(menu_m, "y", "y")
-    verify_visible_if_visibility(menu_if_m, "y", "y")
-
-    verify_visible_if_visibility(menu_visible_if_n, "n", "n")
-    verify_visible_if_visibility(menu_visible_if_m, "n", "m")
-    verify_visible_if_visibility(menu_visible_if_y, "y", "y")
-    verify_visible_if_visibility(menu_visible_if_m_2, "n", "m")
-
-    # Verify that 'visible if' visibility gets propagated to contained symbols
-    verify_sym_visibility("VISIBLE_IF_n", "n", "n")
-    verify_sym_visibility("VISIBLE_IF_m", "n", "m")
-    verify_sym_visibility("VISIBLE_IF_y", "y", "y")
-    verify_sym_visibility("VISIBLE_IF_m_2", "n", "m")
-
-    # Comment visibility
-
-    def verify_comment_visibility(comment, no_module_vis, module_vis):
-        c["MODULES"].set_user_value("n")
-        comment_vis = comment.get_visibility()
-        verify(comment_vis == no_module_vis,
-               "comment \"{0}\" should have visibility '{1}' without "
-               "modules, has visibility '{2}'".
-               format(comment.get_text(), no_module_vis, comment_vis))
-
-        c["MODULES"].set_user_value("y")
-        comment_vis = comment.get_visibility()
-        verify(comment_vis == module_vis,
-               "comment \"{0}\" should have visibility '{1}' with "
-               "modules, has visibility '{2}'".
-               format(comment.get_text(), module_vis, comment_vis))
-
-    comment_n, comment_m, comment_y, comment_if_n, comment_if_m, \
-      comment_if_y, comment_m_nested = c.get_comments()
-
-    verify_comment_visibility(comment_n, "n", "n")
-    verify_comment_visibility(comment_m, "n", "m")
-    verify_comment_visibility(comment_y, "y", "y")
-    verify_comment_visibility(comment_if_n, "n", "n")
-    verify_comment_visibility(comment_if_m, "n", "m")
-    verify_comment_visibility(comment_if_y, "y", "y")
-    verify_comment_visibility(comment_m_nested, "n", "m")
+    verify_visibility(c.syms["VISIBLE_IF_N"], 0, 0)
+    verify_visibility(c.syms["VISIBLE_IF_M"], 0, 1)
+    verify_visibility(c.syms["VISIBLE_IF_Y"], 2, 2)
+    verify_visibility(c.syms["VISIBLE_IF_M_2"], 0, 1)
 
     # Verify that string/int/hex symbols with m visibility accept a user value
 
-    assign_and_verify_new_value("STRING_m", "foo bar", "foo bar")
-    assign_and_verify_new_value("INT_m", "123", "123")
-    assign_and_verify_new_value("HEX_m", "0x123", "0x123")
+    assign_and_verify("STRING_m", "foo bar")
+    assign_and_verify("INT_m", "123")
+    assign_and_verify("HEX_m", "0x123")
 
-    #
-    # Object relations
-    #
 
-    c = kconfiglib.Config("Kconfiglib/tests/Krelation")
+    print("Testing .assignable")
 
-    A, B, C, D, E, F, G, H, I = c["A"], c["B"], c["C"], c["D"], c["E"], c["F"],\
-                                c["G"], c["H"], c["I"]
-    choice_1, choice_2 = c.get_choices()
-    verify([menu.get_title() for menu in c.get_menus()] ==
-           ["m1", "m2", "m3", "m4"],
-           "menu ordering is broken")
-    menu_1, menu_2, menu_3, menu_4 = c.get_menus()
+    c = Kconfig("Kconfiglib/tests/Kassignable")
 
-    print("Testing object relations...")
+    def verify_assignable_imp(item, assignable_no_modules, assignable_modules):
+        """
+        Verifies the assignable values for 'item', with and without modules.
+        """
+        for modules_val, assignable in (0, assignable_no_modules), \
+                                       (2, assignable_modules):
 
-    verify(A.get_parent() is None, "A should not have a parent")
-    verify(B.get_parent() is choice_1, "B's parent should be the first choice")
-    verify(C.get_parent() is choice_1, "C's parent should be the first choice")
-    verify(E.get_parent() is menu_1, "E's parent should be the first menu")
-    verify(E.get_parent().get_parent() is None,
-           "E's grandparent should be None")
-    verify(G.get_parent() is choice_2,
+            c.modules.set_value(modules_val)
+            module_msg = "without modules" if modules_val == 0 else \
+                         "with modules"
+
+            verify(item.assignable == assignable,
+                   "Incorrect assignable values for {} {}. Should be {}, "
+                   "was {}."
+                   .format(item.name, module_msg, assignable, item.assignable))
+
+            # Verify that the values can actually be assigned too
+
+            for val in item.assignable:
+                item.set_value(val)
+                verify(item.tri_value == val,
+                       "Unable to set {} to {} {}, even though it was in "
+                       ".assignable".format(item.name, val, module_msg))
+
+    def verify_assignable(sym_name, assignable_no_modules, assignable_modules):
+        verify_assignable_imp(c.syms[sym_name],
+                              assignable_no_modules,
+                              assignable_modules)
+
+    def verify_const_unassignable(sym_name):
+        verify_assignable_imp(c.const_syms[sym_name], (), ())
+
+    # Things that shouldn't be .assignable
+    verify_const_unassignable("n")
+    verify_const_unassignable("m")
+    verify_const_unassignable("y")
+    verify_const_unassignable("const")
+    verify_assignable("UNDEFINED", (), ())
+    verify_assignable("NO_PROMPT", (), ())
+    verify_assignable("STRING", (), ())
+    verify_assignable("INT", (), ())
+    verify_assignable("HEX", (), ())
+
+    # Non-selected symbols
+    verify_assignable("Y_VIS_BOOL", (0, 2), (0,    2))
+    verify_assignable("M_VIS_BOOL", (    ), (0,    2))  # Vis. promoted
+    verify_assignable("N_VIS_BOOL", (    ), (       ))
+    verify_assignable("Y_VIS_TRI",  (0, 2), (0, 1, 2))
+    verify_assignable("M_VIS_TRI",  (    ), (0, 1   ))
+    verify_assignable("N_VIS_TRI",  (    ), (       ))
+
+    # Symbols selected to y
+    verify_assignable("Y_SEL_Y_VIS_BOOL", (2,), (2,))
+    verify_assignable("Y_SEL_M_VIS_BOOL", (  ), (2,))  # Vis. promoted
+    verify_assignable("Y_SEL_N_VIS_BOOL", (  ), (  ))
+    verify_assignable("Y_SEL_Y_VIS_TRI",  (2,), (2,))
+    verify_assignable("Y_SEL_M_VIS_TRI",  (  ), (2,))
+    verify_assignable("Y_SEL_N_VIS_TRI",  (  ), (  ))
+
+    # Symbols selected to m
+    verify_assignable("M_SEL_Y_VIS_BOOL", (2,), (   2,))  # Value promoted
+    verify_assignable("M_SEL_M_VIS_BOOL", (  ), (   2,))  # Vis./value promoted
+    verify_assignable("M_SEL_N_VIS_BOOL", (  ), (     ))
+    verify_assignable("M_SEL_Y_VIS_TRI",  (2,), (1, 2 ))
+    verify_assignable("M_SEL_M_VIS_TRI",  (  ), (1,   ))
+    verify_assignable("M_SEL_N_VIS_TRI",  (  ), (     ))
+
+    # Symbols implied to y
+    verify_assignable("Y_IMP_Y_VIS_BOOL", (0, 2), (0, 2))
+    verify_assignable("Y_IMP_M_VIS_BOOL", (    ), (0, 2))  # Vis. promoted
+    verify_assignable("Y_IMP_N_VIS_BOOL", (    ), (    ))
+    verify_assignable("Y_IMP_Y_VIS_TRI",  (0, 2), (0, 2))  # m removed by imply
+    verify_assignable("Y_IMP_M_VIS_TRI",  (    ), (0, 2))  # m promoted to y by imply
+    verify_assignable("Y_IMP_N_VIS_TRI",  (    ), (    ))
+
+    # Symbols implied to m (never affects assignable values)
+    verify_assignable("M_IMP_Y_VIS_BOOL", (0, 2), (0,    2))
+    verify_assignable("M_IMP_M_VIS_BOOL", (    ), (0,    2))  # Vis. promoted
+    verify_assignable("M_IMP_N_VIS_BOOL", (    ), (       ))
+    verify_assignable("M_IMP_Y_VIS_TRI",  (0, 2), (0, 1, 2))
+    verify_assignable("M_IMP_M_VIS_TRI",  (    ), (0, 1   ))
+    verify_assignable("M_IMP_N_VIS_TRI",  (    ), (       ))
+
+    # Symbols in y-mode choice
+    verify_assignable("Y_CHOICE_BOOL",           (2,), (2,))
+    verify_assignable("Y_CHOICE_TRISTATE",       (2,), (2,))
+    verify_assignable("Y_CHOICE_N_VIS_TRISTATE", (  ), (  ))
+
+    # Symbols in m/y-mode choice, starting out in m mode, or y mode when
+    # running without modules
+    verify_assignable("MY_CHOICE_BOOL",           (2,), (    ))
+    verify_assignable("MY_CHOICE_TRISTATE",       (2,), (0, 1))
+    verify_assignable("MY_CHOICE_N_VIS_TRISTATE", (  ), (    ))
+
+    c.named_choices["MY_CHOICE"].set_value(2)
+
+    # Symbols in m/y-mode choice, now in y mode
+    verify_assignable("MY_CHOICE_BOOL",           (2,), (2,))
+    verify_assignable("MY_CHOICE_TRISTATE",       (2,), (2,))
+    verify_assignable("MY_CHOICE_N_VIS_TRISTATE", (  ), (  ))
+
+    def verify_choice_assignable(choice_name, assignable_no_modules,
+                                 assignable_modules):
+        verify_assignable_imp(c.named_choices[choice_name],
+                              assignable_no_modules,
+                              assignable_modules)
+
+    # Choices with various possible modes
+    verify_choice_assignable("Y_CHOICE",   (2,  ), (      2,))
+    verify_choice_assignable("MY_CHOICE",  (2,  ), (   1, 2 ))
+    verify_choice_assignable("NMY_CHOICE", (0, 2), (0, 1, 2 ))
+    verify_choice_assignable("NY_CHOICE",  (0, 2), (0,    2 ))
+    verify_choice_assignable("NM_CHOICE",  (    ), (0, 1    ))
+    verify_choice_assignable("M_CHOICE",   (    ), (   1,   ))
+    verify_choice_assignable("N_CHOICE",   (    ), (        ))
+
+
+    print("Testing object relations")
+
+    c = Kconfig("Kconfiglib/tests/Krelation")
+
+    verify(c.syms["A"].nodes[0].parent is c.top_node,
+           "A's parent should be the top node")
+
+    verify(c.syms["B"].nodes[0].parent.item is c.named_choices["CHOICE_1"],
+           "B's parent should be the first choice")
+
+    verify(c.syms["C"].nodes[0].parent.item is c.syms["B"],
+           "C's parent should be B (due to auto menus)")
+
+    verify(c.syms["E"].nodes[0].parent.item == MENU,
+           "E's parent should be a menu")
+
+    verify(c.syms["E"].nodes[0].parent.parent is c.top_node,
+           "E's grandparent should be the top node")
+
+    verify(c.syms["G"].nodes[0].parent.item is c.named_choices["CHOICE_2"],
            "G's parent should be the second choice")
-    verify(G.get_parent().get_parent() is menu_2,
-           "G's grandparent should be the second menu")
 
-    #
-    # Object fetching (same test file)
-    #
+    verify(c.syms["G"].nodes[0].parent.parent.item == MENU,
+           "G's grandparent should be a menu")
 
-    print("Testing object fetching...")
 
-    verify_equals(c.get_symbol("NON_EXISTENT"), None)
-    verify(c.get_symbol("A") is A, "get_symbol() is broken")
+    print("Testing hex/int ranges")
 
-    verify(c.get_top_level_items() == [A, choice_1, menu_1, menu_3, menu_4],
-           "Wrong items at top level")
-    verify(c.get_symbols(False) == [A, B, C, D, E, F, G, H, I],
-           "get_symbols() is broken")
+    c = Kconfig("Kconfiglib/tests/Krange", warn=False)
 
-    verify(choice_1.get_items() == [B, C, D],
-           "Wrong get_items() items in 'choice'")
-    # Test Kconfig quirk
-    verify(choice_1.get_symbols() == [B, D],
-           "Wrong get_symbols() symbols in 'choice'")
+    for sym_name in "HEX_NO_RANGE", "INT_NO_RANGE", "HEX_40", "INT_40":
+        sym = c.syms[sym_name]
+        verify(not sym.ranges,
+               "{} should not have ranges".format(sym_name))
 
-    verify(menu_1.get_items() == [E, menu_2, I], "Wrong items in first menu")
-    verify(menu_1.get_symbols() == [E, I], "Wrong symbols in first menu")
-    verify(menu_1.get_items(True) == [E, menu_2, F, choice_2, G, H, I],
-           "Wrong recursive items in first menu")
-    verify(menu_1.get_symbols(True) == [E, F, G, H, I],
-           "Wrong recursive symbols in first menu")
-    verify(menu_2.get_items() == [F, choice_2],
-           "Wrong items in second menu")
-    verify(menu_2.get_symbols() == [F],
-           "Wrong symbols in second menu")
-    verify(menu_2.get_items(True) == [F, choice_2, G, H],
-           "Wrong recursive items in second menu")
-    verify(menu_2.get_symbols(True) == [F, G, H],
-           "Wrong recursive symbols in second menu")
-
-    #
-    # hex/int ranges
-    #
-
-    print("Testing hex/int ranges...")
-
-    c = kconfiglib.Config("Kconfiglib/tests/Krange")
-
-    for sym_name in ("HEX_NO_RANGE", "INT_NO_RANGE", "HEX_40", "INT_40"):
-        sym = c[sym_name]
-        verify(not sym.has_ranges(),
-               "{0} should not have ranges".format(sym_name))
-
-    for sym_name in ("HEX_ALL_RANGES_DISABLED", "INT_ALL_RANGES_DISABLED",
-                     "HEX_RANGE_10_20_LOW_DEFAULT",
-                     "INT_RANGE_10_20_LOW_DEFAULT"):
-        sym = c[sym_name]
-        verify(sym.has_ranges(), "{0} should have ranges".format(sym_name))
+    for sym_name in "HEX_ALL_RANGES_DISABLED", "INT_ALL_RANGES_DISABLED", \
+                    "HEX_RANGE_10_20_LOW_DEFAULT", \
+                    "INT_RANGE_10_20_LOW_DEFAULT":
+        sym = c.syms[sym_name]
+        verify(sym.ranges, "{} should have ranges".format(sym_name))
 
     # hex/int symbols without defaults should get no default value
     verify_value("HEX_NO_RANGE", "")
@@ -1082,9 +1546,9 @@ def run_selftests():
     verify_value("INT_ALL_RANGES_DISABLED", "")
     # Make sure they are assignable though, and test that the form of the user
     # value is reflected in the value for hex symbols
-    assign_and_verify_new_value("HEX_NO_RANGE", "0x123", "0x123")
-    assign_and_verify_new_value("HEX_NO_RANGE", "123", "123")
-    assign_and_verify_new_value("INT_NO_RANGE", "123", "123")
+    assign_and_verify("HEX_NO_RANGE", "0x123")
+    assign_and_verify("HEX_NO_RANGE", "123")
+    assign_and_verify("INT_NO_RANGE", "123")
 
     # Defaults outside of the valid range should be clamped
     verify_value("HEX_RANGE_10_20_LOW_DEFAULT", "0x10")
@@ -1107,17 +1571,23 @@ def run_selftests():
 
     # User values and dependent ranges
 
+    # Avoid warnings for assigning values outside the active range
+    c.disable_warnings()
+
     def verify_range(sym_name, low, high, default):
-        """Tests that the values in the range 'low'-'high' can be assigned, and
+        """
+        Tests that the values in the range 'low'-'high' can be assigned, and
         that assigning values outside this range reverts the value back to
-        'default' (None if it should revert back to "")."""
-        is_hex = (c[sym_name].get_type() == kconfiglib.HEX)
+        'default' (None if it should revert back to "").
+        """
+        is_hex = (c.syms[sym_name].type == HEX)
+
         for i in range(low, high + 1):
-            assign_and_verify_new_user_value(sym_name, str(i), str(i))
+            assign_and_verify_user_value(sym_name, str(i), str(i), True)
             if is_hex:
                 # The form of the user value should be preserved for hex
                 # symbols
-                assign_and_verify_new_user_value(sym_name, hex(i), hex(i))
+                assign_and_verify_user_value(sym_name, hex(i), hex(i), True)
 
         # Verify that assigning a user value just outside the range causes
         # defaults to be used
@@ -1134,8 +1604,8 @@ def run_selftests():
             too_low_str = str(low - 1)
             too_high_str = str(high + 1)
 
-        assign_and_verify_new_value(sym_name, too_low_str, default_str)
-        assign_and_verify_new_value(sym_name, too_high_str, default_str)
+        assign_and_verify_value(sym_name, too_low_str, default_str)
+        assign_and_verify_value(sym_name, too_high_str, default_str)
 
     verify_range("HEX_RANGE_10_20_LOW_DEFAULT",  0x10, 0x20,  0x10)
     verify_range("HEX_RANGE_10_20_HIGH_DEFAULT", 0x10, 0x20,  0x20)
@@ -1146,7 +1616,6 @@ def run_selftests():
     verify_range("INT_RANGE_10_20_OK_DEFAULT",   10,   20,    15)
 
     verify_range("HEX_RANGE_10_20",              0x10, 0x20,  0x10)
-    verify_range("HEX_RANGE_0_10",               0x0,  0x10,  None)
 
     verify_range("INT_RANGE_10_20",              10,  20,     10)
     verify_range("INT_RANGE_0_10",               0,   10,     None)
@@ -1157,332 +1626,217 @@ def run_selftests():
     verify_value("HEX_40", "40")
     verify_value("INT_40", "40")
 
-    c["HEX_RANGE_10_20"].unset_user_value()
-    c["INT_RANGE_10_20"].unset_user_value()
+    c.syms["HEX_RANGE_10_20"].unset_value()
+    c.syms["INT_RANGE_10_20"].unset_value()
     verify_value("HEX_RANGE_10_40_DEPENDENT", "0x10")
     verify_value("INT_RANGE_10_40_DEPENDENT", "10")
-    c["HEX_RANGE_10_20"].set_user_value("15")
-    c["INT_RANGE_10_20"].set_user_value("15")
+    c.syms["HEX_RANGE_10_20"].set_value("15")
+    c.syms["INT_RANGE_10_20"].set_value("15")
     verify_value("HEX_RANGE_10_40_DEPENDENT", "0x15")
     verify_value("INT_RANGE_10_40_DEPENDENT", "15")
-    c.unset_user_values()
+    c.unset_values()
     verify_range("HEX_RANGE_10_40_DEPENDENT", 0x10, 0x40,  0x10)
     verify_range("INT_RANGE_10_40_DEPENDENT", 10,   40,    10)
 
-    #
-    # get_referenced_symbols()
-    #
+    # Ranges and symbols defined in multiple locations
 
-    c = kconfiglib.Config("Kconfiglib/tests/Kref")
+    verify_value("INACTIVE_RANGE", "2")
+    verify_value("ACTIVE_RANGE", "1")
 
-    # General function for checking get_referenced_symbols() output.
-    # Specialized for symbols below.
-    def verify_refs(item, refs_no_enclosing, refs_enclosing):
-        item_refs = item.get_referenced_symbols()
-        item_refs_enclosing = item.get_referenced_symbols(True)
 
-        # For failure messages
-        if item.is_symbol():
-            item_string = item.get_name()
-        elif item.is_choice():
-            if item.get_name() is None:
-                item_string = "choice"
-            else:
-                item_string = "choice " + item.get_name()
-        elif item.is_menu():
-            item_string = 'menu "{0}"'.format(item.get_title())
-        else:
-            # Comment
-            item_string = 'comment "{0}"'.format(item.get_text())
+    print("Testing defconfig_filename")
 
-        verify(len(item_refs) == len(refs_no_enclosing),
-               "Wrong number of refs excluding enclosing for {0}".
-               format(item_string))
-        verify(len(item_refs_enclosing) == len(refs_enclosing),
-               "Wrong number of refs including enclosing for {0}".
-               format(item_string))
-        for r in [c[name] for name in refs_no_enclosing]:
-            verify(r in item_refs,
-                   "{0} should reference {1} when excluding enclosing".
-                   format(item_string, r.get_name()))
-        for r in [c[name] for name in refs_enclosing]:
-            verify(r in item_refs_enclosing,
-                   "{0} should reference {1} when including enclosing".
-                   format(item_string, r.get_name()))
+    c = Kconfig("Kconfiglib/tests/empty")
+    verify(c.defconfig_filename is None,
+           "defconfig_filename should be None with no defconfig_list symbol")
 
-    # Symbols referenced by symbols
-
-    def verify_sym_refs(sym_name, refs_no_enclosing, refs_enclosing):
-        verify_refs(c[sym_name], refs_no_enclosing, refs_enclosing)
-
-    verify_sym_refs("NO_REF", [], [])
-    verify_sym_refs("ONE_REF", ["A"], ["A"])
-    own_refs = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L",
-                "M", "N", "O"]
-    verify_sym_refs("MANY_REF",
-      own_refs,
-      own_refs + ["IF_REF_1", "IF_REF_2", "MENU_REF_1",
-                  "MENU_REF_2"])
-
-    # Symbols referenced by choices
-
-    own_refs = ["CHOICE_REF_4", "CHOICE_REF_5", "CHOICE_REF_6"]
-    verify_refs(c.get_choices()[0],
-      own_refs,
-      own_refs + ["CHOICE_REF_1", "CHOICE_REF_2", "CHOICE_REF_3"])
-
-    # Symbols referenced by menus
-
-    own_refs = ["NO_REF", "MENU_REF_3"]
-    verify_refs(c.get_menus()[1],
-      own_refs,
-      own_refs + ["MENU_REF_1", "MENU_REF_2"])
-
-    # Symbols referenced by comments
-
-    own_refs = ["COMMENT_REF_3", "COMMENT_REF_4", "COMMENT_REF_5"]
-    verify_refs(c.get_comments()[0],
-      own_refs,
-      own_refs + ["COMMENT_REF_1", "COMMENT_REF_2"])
-
-    #
-    # get_selected_symbols() (same test file)
-    #
-
-    def verify_selects(sym_name, selection_names):
-        sym = c[sym_name]
-        sym_selections = sym.get_selected_symbols()
-        verify(len(sym_selections) == len(selection_names),
-               "Wrong number of selects for {0}".format(sym_name))
-        for sel_name in selection_names:
-            sel_sym = c[sel_name]
-            verify(sel_sym in sym_selections,
-                   "{0} should be selected by {1}".format(sel_name, sym_name))
-
-    verify_selects("n", [])
-    verify_selects("m", [])
-    verify_selects("y", [])
-    verify_selects("UNAME_RELEASE", [])
-
-    verify_selects("NO_REF", [])
-    verify_selects("MANY_REF", ["I", "N"])
-
-    #
-    # get_defconfig_filename()
-    #
-
-    print("Testing get_defconfig_filename()...")
-
-    c = kconfiglib.Config("Kconfiglib/tests/empty")
-    verify(c.get_defconfig_filename() is None,
-           "get_defconfig_filename() should be None with no defconfig_list "
-           "symbol")
-
-    c = kconfiglib.Config("Kconfiglib/tests/Kdefconfig_nonexistent")
-    verify(c.get_defconfig_filename() is None,
-           "get_defconfig_filename() should be None when none of the files "
-           "in the defconfig_list symbol exist")
+    c = Kconfig("Kconfiglib/tests/Kdefconfig_nonexistent")
+    verify(c.defconfig_filename is None,
+           "defconfig_filename should be None when none of the files in the "
+           "defconfig_list symbol exist")
 
     # Referenced in Kdefconfig_existent(_but_n)
-    os.environ["BAR"] = "defconfig_2"
+    os.environ["FOO"] = "defconfig_2"
 
-    c = kconfiglib.Config("Kconfiglib/tests/Kdefconfig_existent_but_n")
-    verify(c.get_defconfig_filename() is None,
-           "get_defconfig_filename() should be None when the condition is "
-           "n for all the defaults")
+    c = Kconfig("Kconfiglib/tests/Kdefconfig_existent_but_n")
+    verify(c.defconfig_filename is None,
+           "defconfig_filename should be None when the condition is n for all "
+           "the defaults")
 
-    c = kconfiglib.Config("Kconfiglib/tests/Kdefconfig_existent")
-    verify(c.get_defconfig_filename() == "Kconfiglib/tests/defconfig_2",
-           "get_defconfig_filename() should return the existent file "
+    c = Kconfig("Kconfiglib/tests/Kdefconfig_existent")
+    verify(c.defconfig_filename == "Kconfiglib/tests/defconfig_2",
+           "defconfig_filename should return the existing file "
            "Kconfiglib/tests/defconfig_2")
 
-    #
-    # get_mainmenu_text()
-    #
+    # Should also look relative to $srctree if the specified defconfig is a
+    # relative path and can't be opened
 
-    print("Testing get_mainmenu_text()...")
+    c = Kconfig("Kconfiglib/tests/Kdefconfig_srctree")
+    verify(c.defconfig_filename == "Kconfiglib/tests/defconfig_2",
+           "defconfig_filename gave wrong file with $srctree unset")
 
-    c = kconfiglib.Config("Kconfiglib/tests/empty")
-    verify(c.get_mainmenu_text() is None,
-           "An empty Kconfig should not have a mainmenu text")
+    os.environ["srctree"] = "Kconfiglib/tests"
+    c = Kconfig("Kdefconfig_srctree")
+    verify(c.defconfig_filename == "Kconfiglib/tests/sub/defconfig_in_sub",
+           "defconfig_filename gave wrong file with $srctree set")
+
+    os.environ.pop("srctree", None)
+
+
+    print("Testing mainmenu_text")
+
+    c = Kconfig("Kconfiglib/tests/empty")
+    verify(c.mainmenu_text == "Main menu",
+           "An empty Kconfig should get a default main menu prompt")
 
     # Expanded in the mainmenu text
     os.environ["FOO"] = "bar baz"
-    c = kconfiglib.Config("Kconfiglib/tests/Kmainmenu")
-    verify(c.get_mainmenu_text() == "---bar baz---",
+    c = Kconfig("Kconfiglib/tests/Kmainmenu")
+    verify(c.mainmenu_text == "---bar baz---",
            "Wrong mainmenu text")
 
-    #
-    # Misc. minor APIs
-    #
 
-    os.environ["ENV_VAR"] = "foo"
-    # Contains reference to undefined environment variable, so disable warnings
-    c = kconfiglib.Config("Kconfiglib/tests/Kmisc", print_warnings = False)
+    print("Testing user_value")
 
-    print("Testing is_optional()...")
-
-    verify(not c.get_choices()[0].is_optional(),
-           "First choice should not be optional")
-    verify(c.get_choices()[1].is_optional(),
-           "Second choice should be optional")
-
-    print("Testing get_user_value()...")
+    # References undefined env. var. Disable warnings.
+    c = Kconfig("Kconfiglib/tests/Kmisc", warn=False)
 
     # Avoid warnings from assigning invalid user values and assigning user
     # values to symbols without prompts
-    c.set_print_warnings(False)
+    c.disable_warnings()
 
-    syms = [c[name] for name in \
-      ("BOOL", "TRISTATE", "STRING", "INT", "HEX")]
+    syms = [c.syms[name] for name in
+            ("BOOL", "TRISTATE", "STRING", "INT", "HEX")]
 
     for sym in syms:
-        verify(sym.get_user_value() is None,
-               "{0} should not have a user value to begin with")
+        verify(sym.user_value is None,
+               "{} should not have a user value to begin with")
 
     # Assign valid values for the types
 
-    assign_and_verify_new_user_value("BOOL", "n", "n")
-    assign_and_verify_new_user_value("BOOL", "y", "y")
-    assign_and_verify_new_user_value("TRISTATE", "n", "n")
-    assign_and_verify_new_user_value("TRISTATE", "m", "m")
-    assign_and_verify_new_user_value("TRISTATE", "y", "y")
-    assign_and_verify_new_user_value("STRING", "foo bar", "foo bar")
-    assign_and_verify_new_user_value("INT", "123", "123")
-    assign_and_verify_new_user_value("HEX", "0x123", "0x123")
+    assign_and_verify_user_value("BOOL", 0, 0, True)
+    assign_and_verify_user_value("BOOL", 2, 2, True)
+    assign_and_verify_user_value("TRISTATE", 0, 0, True)
+    assign_and_verify_user_value("TRISTATE", 1, 1, True)
+    assign_and_verify_user_value("TRISTATE", 2, 2, True)
+    assign_and_verify_user_value("STRING", "foo bar", "foo bar", True)
+    assign_and_verify_user_value("INT", "123", "123", True)
+    assign_and_verify_user_value("HEX", "0x123", "0x123", True)
 
     # Assign invalid values for the types. They should retain their old user
     # value.
 
-    assign_and_verify_new_user_value("BOOL", "m", "y")
-    assign_and_verify_new_user_value("BOOL", "foo", "y")
-    assign_and_verify_new_user_value("BOOL", "1", "y")
-    assign_and_verify_new_user_value("TRISTATE", "foo", "y")
-    assign_and_verify_new_user_value("TRISTATE", "1", "y")
-    assign_and_verify_new_user_value("INT", "foo", "123")
-    assign_and_verify_new_user_value("HEX", "foo", "0x123")
+    assign_and_verify_user_value("BOOL", 1, 2, False)
+    assign_and_verify_user_value("BOOL", "foo", 2, False)
+    assign_and_verify_user_value("BOOL", "1", 2, False)
+    assign_and_verify_user_value("TRISTATE", "foo", 2, False)
+    assign_and_verify_user_value("TRISTATE", "1", 2, False)
+    assign_and_verify_user_value("STRING", 0, "foo bar", False)
+    assign_and_verify_user_value("INT", "foo", "123", False)
+    assign_and_verify_user_value("INT", 0, "123", False)
+    assign_and_verify_user_value("HEX", "foo", "0x123", False)
+    assign_and_verify_user_value("HEX", 0, "0x123", False)
+    assign_and_verify_user_value("HEX", "-0x1", "0x123", False)
 
     for s in syms:
-        s.unset_user_value()
-        verify(s.get_user_value() is None,
-               "{0} should not have a user value after being reset".
-               format(s.get_name()))
+        s.unset_value()
+        verify(s.user_value is None,
+               "{} should not have a user value after being reset".
+               format(s.name))
 
-    print("Testing is_defined()...")
 
-    for sym_name in ("n", "m", "y", "UNAME_RELEASE", "A", "B", "C", "D",
-                     "BOOL", "TRISTATE", "STRING", "INT", "HEX"):
-        sym = c[sym_name]
-        verify(sym.is_defined(),
-               "{0} should be defined".format(sym_name))
+    print("Testing is_menuconfig")
 
-    for sym_name in ("NOT_DEFINED_1", "NOT_DEFINED_2", "NOT_DEFINED_3",
-                     "NOT_DEFINED_4"):
-        sym = c[sym_name]
-        verify(not sym.is_defined(),
-               "{0} should not be defined".format(sym_name))
+    c = Kconfig("Kconfiglib/tests/Kmenuconfig")
 
-    print("Testing is_special()...")
+    for not_menuconfig in c.syms["NOT_MENUCONFIG_1"].nodes[0], \
+                          c.syms["NOT_MENUCONFIG_2"].nodes[0], \
+                          c.syms["MENUCONFIG_MULTI_DEF"].nodes[0], \
+                          c.syms["COMMENT_HOOK"].nodes[0].next:
 
-    for sym_name in ("n", "m", "y", "UNAME_RELEASE", "FROM_ENV",
-                     "FROM_ENV_MISSING"):
-        sym = c[sym_name]
-        verify(sym.is_special(),
-               "{0} should be special".format(sym_name))
+        verify(not not_menuconfig.is_menuconfig,
+               "'{}' should have is_menuconfig False".format(not_menuconfig))
 
-    for sym_name in ("A", "B", "C", "D", "BOOL", "TRISTATE", "STRING",
-                     "INT", "HEX", "NOT_DEFINED_1", "NOT_DEFINED_2",
-                     "NOT_DEFINED_3", "NOT_DEFINED_4"):
-        sym = c[sym_name]
-        verify(not sym.is_special(),
-               "{0} should not be special".format(sym_name))
+    for menuconfig in c.top_node, \
+                      c.syms["MENUCONFIG_1"].nodes[0], \
+                      c.syms["MENUCONFIG_MULTI_DEF"].nodes[1], \
+                      c.syms["MENU_HOOK"].nodes[0].next, \
+                      c.syms["CHOICE_HOOK"].nodes[0].next:
 
-    print("Testing is_from_environment()...")
+        verify(menuconfig.is_menuconfig,
+               "'{}' should have is_menuconfig True".format(menuconfig))
 
-    for sym_name in ("FROM_ENV", "FROM_ENV_MISSING"):
-        sym = c[sym_name]
-        verify(sym.is_from_environment(),
-               "{0} should be from the environment".format(sym_name))
 
-    for sym_name in ("n", "m", "y", "UNAME_RELEASE", "A", "B", "C", "D",
-                     "BOOL", "TRISTATE", "STRING", "INT", "HEX",
-                     "NOT_DEFINED_1", "NOT_DEFINED_2", "NOT_DEFINED_3",
-                     "NOT_DEFINED_4"):
-        sym = c[sym_name]
-        verify(not sym.is_from_environment(),
-               "{0} should not be from the environment".format(sym_name))
+    print("Testing 'option env' semantics")
 
-    print("Testing is_choice_symbol()...")
+    os.environ["ENV_VAR"] = "ENV_VAR value"
 
-    for sym_name in ("A", "B", "C", "D"):
-        sym = c[sym_name]
-        verify(sym.is_choice_symbol(),
-               "{0} should be a choice symbol".format(sym_name))
+    # References undefined env. var., so disable warnings
+    c = Kconfig("Kconfiglib/tests/Kmisc", warn=False)
 
-    for sym_name in ("n", "m", "y", "UNAME_RELEASE", "Q1", "Q2", "Q3", "BOOL",
-                     "TRISTATE", "STRING", "INT", "HEX", "FROM_ENV",
-                     "FROM_ENV_MISSING", "NOT_DEFINED_1", "NOT_DEFINED_2",
-                     "NOT_DEFINED_3", "NOT_DEFINED_4"):
-        sym = c[sym_name]
-        verify(not sym.is_choice_symbol(),
-               "{0} should not be a choice symbol".format(sym_name))
+    # Verify that 'option env' is treated like a default
+    verify_value("FROM_ENV", "ENV_VAR value")
+    verify_value("FROM_ENV_MISSING", "missing")
 
-    print("Testing is_allnoconfig_y()...")
+    verify_value("FROM_ENV_WEIRD", "weird")
 
-    verify(not c["NOT_ALLNOCONFIG_Y"].is_allnoconfig_y(),
+
+    print("Testing defined vs undefined symbols")
+
+    for name in "A", "B", "C", "D", "BOOL", "TRISTATE", "STRING", "INT", "HEX":
+        verify(c.syms[name].nodes,
+               "{} should be defined".format(name))
+
+    for name in "NOT_DEFINED_1", "NOT_DEFINED_2", "NOT_DEFINED_3", \
+                "NOT_DEFINED_4":
+        sym = c.syms[name]
+        verify(not c.syms[name].nodes,
+               "{} should not be defined".format(name))
+
+
+    print("Testing Symbol.choice")
+
+    for name in "A", "B", "C", "D":
+        verify(c.syms[name].choice is not None,
+               "{} should be a choice symbol".format(name))
+
+    for name in "Q1", "Q2", "Q3", "BOOL", "TRISTATE", "STRING", "INT", "HEX", \
+                "FROM_ENV", "FROM_ENV_MISSING", "NOT_DEFINED_1", \
+                "NOT_DEFINED_2", "NOT_DEFINED_3", "NOT_DEFINED_4":
+        verify(c.syms[name].choice is None,
+               "{} should not be a choice symbol".format(name))
+
+
+    print("Testing is_allnoconfig_y")
+
+    verify(not c.syms["NOT_ALLNOCONFIG_Y"].is_allnoconfig_y,
            "NOT_ALLNOCONFIG_Y should not be allnoconfig_y")
-    verify(c["ALLNOCONFIG_Y"].is_allnoconfig_y(),
+    verify(c.syms["ALLNOCONFIG_Y"].is_allnoconfig_y,
            "ALLNOCONFIG_Y should be allnoconfig_y")
 
-    print("Testing UNAME_RELEASE value...")
 
-    verify_value("UNAME_RELEASE", os.uname()[2])
-
-    # Expansion of environment variables in Config.__init__'s base_dir
-    # parameter. Just make sure we don't crash when Kbase_dir 'source's a file
-    # from the same directory.
-
-    os.environ["EnV_VaR1"] = "Kconfigl"
-    os.environ["EnV_VaR2"] = "ib/tests"
-    kconfiglib.Config("Kconfiglib/tests/Kbase_dir",
-                      base_dir = "$EnV_VaR1$EnV_VaR2/")
-
-    #
-    # .config reading and writing
-    #
-
-    print("Testing .config reading and writing...")
+    print("Testing .config reading and writing")
 
     config_test_file = "Kconfiglib/tests/config_test"
-
-    def verify_header(config_name, header):
-        c.load_config(config_name)
-        verify(c.get_config_header() == header,
-               "Expected the header '{0}' from '{1}', got the header '{2}'.".
-               format(header, config_name, c.get_config_header()))
-
-    def write_and_verify_header(header):
-        c.write_config(config_test_file, header)
-        verify_header(config_test_file, header)
 
     def verify_file_contents(fname, contents):
         with open(fname, "r") as f:
             file_contents = f.read()
             verify(file_contents == contents,
-                   "{0} contains '{1}'. Expected '{2}'."
+                   "{} contains '{}'. Expected '{}'."
                    .format(fname, file_contents, contents))
 
     # Writing/reading strings with characters that need to be escaped
 
-    c = kconfiglib.Config("Kconfiglib/tests/Kescape")
+    c = Kconfig("Kconfiglib/tests/Kescape")
 
     # Test the default value
-    c.write_config(config_test_file + "_from_def")
+    c.write_config(config_test_file + "_from_def", header="")
     verify_file_contents(config_test_file + "_from_def",
                          r'''CONFIG_STRING="\"\\"''' "\n")
     # Write our own value
-    c["STRING"].set_user_value(r'''\"a'\\''')
-    c.write_config(config_test_file + "_from_user")
+    c.syms["STRING"].set_value(r'''\"a'\\''')
+    c.write_config(config_test_file + "_from_user", header="")
     verify_file_contents(config_test_file + "_from_user",
                          r'''CONFIG_STRING="\\\"a'\\\\"''' "\n")
 
@@ -1492,61 +1846,21 @@ def run_selftests():
     c.load_config(config_test_file + "_from_user")
     verify_value("STRING", r'''\"a'\\''')
 
-    # Reading and writing of .config headers
-
-    verify(c.get_config_header() is None,
-           "Expected no header before .config loaded, got '{0}'".
-           format(c.get_config_header()))
-
-    write_and_verify_header("")
-    write_and_verify_header(" ")
-    write_and_verify_header("\n")
-    write_and_verify_header("\n\n")
-    write_and_verify_header("#")
-    write_and_verify_header("a")
-    write_and_verify_header("a\n")
-    write_and_verify_header("a\n\n")
-    write_and_verify_header("abcdef")
-    write_and_verify_header("foo\nbar baz\n\n\n qaz#")
-
-    c.load_config("Kconfiglib/tests/empty")
-    verify(c.get_config_header() is None,
-           "Expected no header in empty .config, got '{0}'".
-           format(c.get_config_header()))
-
-    c.load_config("Kconfiglib/tests/config_hash")
-    verify(c.get_config_header() == "",
-           "Expected empty header in file with just '#', got '{0}'".
-           format(c.get_config_header()))
-
-    # TODO: Line joining (which stems from _FileFeed reuse) probably doesn't
-    # make sense within .config files. (The C implementation has no notion of
-    # continuation lines within .config files.) It's harmless except for fairly
-    # obscure cases though.
-    #
-    # Add a test for now just to get test coverage for _FileFeed.peek_next(),
-    # which is only used while reading .config files as of writing.
-
-    c.load_config("Kconfiglib/tests/config_continuation")
-    verify(c.get_config_header() ==
-           " Foo # Bar\n Baz # Foo # Bar\n Baz\n Foo",
-           "Continuation line handling within .config headers is broken")
-
     # Appending values from a .config
 
-    c = kconfiglib.Config("Kconfiglib/tests/Kappend")
+    c = Kconfig("Kconfiglib/tests/Kappend")
 
     # Values before assigning
     verify_value("BOOL", "n")
     verify_value("STRING", "")
 
     # Assign BOOL
-    c.load_config("Kconfiglib/tests/config_set_bool", replace = False)
+    c.load_config("Kconfiglib/tests/config_set_bool", replace=False)
     verify_value("BOOL", "y")
     verify_value("STRING", "")
 
     # Assign STRING
-    c.load_config("Kconfiglib/tests/config_set_string", replace = False)
+    c.load_config("Kconfiglib/tests/config_set_string", replace=False)
     verify_value("BOOL", "y")
     verify_value("STRING", "foo bar")
 
@@ -1563,557 +1877,946 @@ def run_selftests():
     c.load_config("Kconfiglib/tests/config_indented")
     verify_value("IGNOREME", "y")
 
-    #
-    # get_config()
-    #
+    # Symbol order in headers and minimal configuration files should match
+    # definition order, like in .config files
 
-    print("Testing get_config()...")
+    c = Kconfig("Kconfiglib/tests/Korder")
 
-    c1 = kconfiglib.Config("Kconfiglib/tests/Kmisc", print_warnings = False)
-    c2 = kconfiglib.Config("Kconfiglib/tests/Kmisc", print_warnings = False)
+    c.write_autoconf(config_test_file, header="")
+    verify_file_contents(config_test_file, """
+#define CONFIG_O 0
+#define CONFIG_R 1
+#define CONFIG_D 2
+#define CONFIG_E 3
+#define CONFIG_R2 4
+#define CONFIG_I 5
+#define CONFIG_N 6
+#define CONFIG_G 7
+"""[1:])
 
-    c1_bool, c1_choice, c1_menu, c1_comment = c1["BOOL"], \
-      c1.get_choices()[0], c1.get_menus()[0], c1.get_comments()[0]
-    c2_bool, c2_choice, c2_menu, c2_comment = c2["BOOL"], \
-      c2.get_choices()[0], c2.get_menus()[0], c2.get_comments()[0]
+    # Differs from defaults
+    c.syms["O"].set_value("-1")
+    c.syms["R"].set_value("-1")
+    c.syms["E"].set_value("-1")
+    c.syms["R2"].set_value("-1")
+    c.syms["N"].set_value("-1")
+    c.syms["G"].set_value("-1")
+    c.write_min_config(config_test_file, header="")
+    verify_file_contents(config_test_file, """
+CONFIG_O=-1
+CONFIG_R=-1
+CONFIG_E=-1
+CONFIG_R2=-1
+CONFIG_N=-1
+CONFIG_G=-1
+"""[1:])
 
-    verify((c1_bool is not c2_bool) and (c1_choice is not c2_choice) and
-           (c1_menu is not c2_menu) and (c1_comment is not c2_comment) and
-           (c1_bool.get_config()    is c1) and (c2_bool.get_config()    is c2) and
-           (c1_choice.get_config()  is c1) and (c2_choice.get_config()  is c2) and
-           (c1_menu.get_config()    is c1) and (c2_menu.get_config()    is c2) and
-           (c1_comment.get_config() is c1) and (c2_comment.get_config() is c2),
-           "Config instance state separation or get_config() is broken")
 
-    #
-    # get_arch/srcarch/srctree/kconfig_filename()
-    #
+    print("Testing Kconfig fetching and separation")
 
-    os.environ["ARCH"] = "ARCH value"
-    os.environ["SRCARCH"] = "SRCARCH value"
-    os.environ["srctree"] = "srctree value"
-    c = kconfiglib.Config("Kconfiglib/tests/Kmisc", print_warnings = False)
-    c.load_config("Kconfiglib/tests/empty")
+    for c in Kconfig("Kconfiglib/tests/Kmisc", warn=False), \
+             Kconfig("Kconfiglib/tests/Kmisc", warn=False):
+        for item in c.syms["BOOL"], \
+                    c.syms["BOOL"].nodes[0], \
+                    c.named_choices["OPTIONAL"], \
+                    c.named_choices["OPTIONAL"].nodes[0], \
+                    c.syms["MENU_HOOK"].nodes[0].next, \
+                    c.syms["COMMENT_HOOK"].nodes[0].next:
+            verify(item.kconfig is c,
+                   ".kconfig not properly set for " + repr(item))
 
-    arch = c.get_arch()
-    srcarch = c.get_srcarch()
-    srctree = c.get_srctree()
-    config_filename = c.get_config_filename()
-    kconfig_filename = c.get_kconfig_filename()
 
-    print("Testing get_arch()...")
-    verify(arch == "ARCH value",
-           "Wrong arch value - got '{0}'".format(arch))
-    print("Testing get_srcarch()...")
-    verify(srcarch == "SRCARCH value",
-           "Wrong srcarch value - got '{0}'".format(srcarch))
-    print("Testing get_srctree()...")
-    verify(srctree == "srctree value",
-           "Wrong srctree value - got '{0}'".format(srctree))
-    print("Testing get_config_filename()...")
-    verify(config_filename == "Kconfiglib/tests/empty",
-           "Wrong config filename - got '{0}'".format(config_filename))
-    print("Testing get_kconfig_filename()...")
-    verify(kconfig_filename == "Kconfiglib/tests/Kmisc",
-           "Wrong Kconfig filename - got '{0}'".format(kconfig_filename))
+    print("Testing imply semantics")
 
-    #
-    # Choice semantics
-    #
+    c = Kconfig("Kconfiglib/tests/Kimply")
 
-    print("Testing choice semantics...")
+    verify_value("IMPLY_DIRECT_DEPS", "y")
+    verify_value("UNMET_DIRECT_1", "n")
+    verify_value("UNMET_DIRECT_2", "n")
+    verify_value("UNMET_DIRECT_3", "n")
+    verify_value("MET_DIRECT_1", "y")
+    verify_value("MET_DIRECT_2", "y")
+    verify_value("MET_DIRECT_3", "y")
+    verify_value("MET_DIRECT_4", "y")
 
-    c = kconfiglib.Config("Kconfiglib/tests/Kchoice")
+    verify_value("IMPLY_COND", "y")
+    verify_value("IMPLIED_N_COND", "n")
+    verify_value("IMPLIED_M_COND", "m")
+    verify_value("IMPLIED_Y_COND", "y")
 
-    choice_bool, choice_bool_opt, choice_tristate, choice_tristate_opt, \
-      choice_bool_m, choice_tristate_m, choice_defaults, \
-      choice_no_type_bool, choice_no_type_tristate, \
-      choice_missing_member_type_1, choice_missing_member_type_2 \
-      = c.get_choices()
+    verify_value("IMPLY_N_1", "n")
+    verify_value("IMPLY_N_2", "n")
+    verify_value("IMPLIED_FROM_N_1", "n")
+    verify_value("IMPLIED_FROM_N_2", "n")
 
-    for choice in (choice_bool, choice_bool_opt, choice_bool_m,
-                   choice_defaults):
-        verify(choice.get_type() == kconfiglib.BOOL,
-               "choice {0} should have type bool".format(choice.get_name()))
+    verify_value("IMPLY_M", "m")
+    verify_value("IMPLIED_M", "m")
+    verify_value("IMPLIED_M_BOOL", "y")
 
-    for choice in (choice_tristate, choice_tristate_opt, choice_tristate_m):
-        verify(choice.get_type() == kconfiglib.TRISTATE,
-               "choice {0} should have type tristate"
-               .format(choice.get_name()))
+    verify_value("IMPLY_M_TO_Y", "y")
+    verify_value("IMPLIED_M_TO_Y", "y")
+
+    # Test user value semantics
+
+    # Verify that IMPLIED_TRISTATE is invalidated if the direct
+    # dependencies change
+
+    assign_and_verify("IMPLY", 2)
+    assign_and_verify("DIRECT_DEP", 2)
+    verify_value("IMPLIED_TRISTATE", 2)
+    assign_and_verify("DIRECT_DEP", 0)
+    verify_value("IMPLIED_TRISTATE", 0)
+    # Set back for later tests
+    assign_and_verify("DIRECT_DEP", 2)
+
+    # Verify that IMPLIED_TRISTATE can be set to anything when IMPLY has value
+    # n, and that it gets the value n by default (for non-imply-related
+    # reasons)
+
+    assign_and_verify("IMPLY", 0)
+    assign_and_verify("IMPLIED_TRISTATE", 0)
+    assign_and_verify("IMPLIED_TRISTATE", 1)
+    assign_and_verify("IMPLIED_TRISTATE", 2)
+    c.syms["IMPLIED_TRISTATE"].unset_value()
+    verify_value("IMPLIED_TRISTATE", "n")
+
+    # Same as above for m. Anything still goes, but m by default now.
+
+    assign_and_verify("IMPLY", 1)
+    assign_and_verify("IMPLIED_TRISTATE", 0)
+    assign_and_verify("IMPLIED_TRISTATE", 1)
+    assign_and_verify("IMPLIED_TRISTATE", 2)
+    c.syms["IMPLIED_TRISTATE"].unset_value()
+    verify_value("IMPLIED_TRISTATE", 1)
+
+    # Same as above for y. Only n and y should be accepted. m gets promoted to
+    # y. Default should be y.
+
+    assign_and_verify("IMPLY", 2)
+    assign_and_verify("IMPLIED_TRISTATE", 0)
+    assign_and_verify_value("IMPLIED_TRISTATE", 1, 2)
+    assign_and_verify("IMPLIED_TRISTATE", 2)
+    c.syms["IMPLIED_TRISTATE"].unset_value()
+    verify_value("IMPLIED_TRISTATE", 2)
+
+    # Being implied to either m or y should give a bool the value y
+
+    c.syms["IMPLY"].unset_value()
+    verify_value("IMPLIED_BOOL", 0)
+    assign_and_verify("IMPLY", 0)
+    verify_value("IMPLIED_BOOL", 0)
+    assign_and_verify("IMPLY", 1)
+    verify_value("IMPLIED_BOOL", 2)
+    assign_and_verify("IMPLY", 2)
+    verify_value("IMPLIED_BOOL", 2)
+
+    # A bool implied to m or y can take the values n and y
+
+    c.syms["IMPLY"].set_value(1)
+    assign_and_verify("IMPLIED_BOOL", 0)
+    assign_and_verify("IMPLIED_BOOL", 2)
+
+    c.syms["IMPLY"].set_value(2)
+    assign_and_verify("IMPLIED_BOOL", 0)
+    assign_and_verify("IMPLIED_BOOL", 2)
+
+
+    print("Testing choice semantics")
+
+    # Would warn for choice value symbols defined without a type, even
+    # though the type is automatically derived. This is probably more
+    # helpful than ignoring those cases, as this feature isn't used
+    # deliberately anywhere from what I've seen.
+    c = Kconfig("Kconfiglib/tests/Kchoice", warn=False)
+
+    for name in "BOOL", "BOOL_OPT", "BOOL_M", "DEFAULTS":
+        verify(c.named_choices[name].orig_type == BOOL,
+               "choice {} should have type bool".format(name))
+
+    for name in "TRISTATE", "TRISTATE_OPT", "TRISTATE_M":
+        verify(c.named_choices[name].orig_type == TRISTATE,
+               "choice {} should have type tristate".format(name))
 
     def select_and_verify(sym):
-        choice = sym.get_parent()
-        sym.set_user_value("y")
-        verify(choice.get_mode() == "y",
-               'The mode of the choice should be "y" after selecting a '
-               "symbol")
-        verify(sym.is_choice_selection(),
-               "is_choice_selection() should be true for {0}"
-               .format(sym.get_name()))
-        verify(choice.get_selection() is sym,
-               "{0} should be the selected symbol".format(sym.get_name()))
-        verify(choice.get_user_selection() is sym,
-               "{0} should be the user selection of the choice"
-               .format(sym.get_name()))
+        choice = sym.nodes[0].parent.item
+        choice.set_value(2)
 
-    def select_and_verify_all(choice):
-        choice_syms = choice.get_symbols()
+        sym.set_value(2)
+
+        verify(sym.choice.selection is sym,
+               sym.name + " should be the selected symbol")
+
+        verify(choice.user_selection is sym,
+               sym.name + " should be the user selection of the choice")
+
+        verify(sym.tri_value == 2,
+               sym.name + " should have value y when selected")
+
+        verify(sym.user_value == 2,
+               sym.name + " should have user value y when selected")
+
+        for sibling in choice.syms:
+            if sibling is not sym:
+                verify(sibling.tri_value == 0,
+                       sibling.name + " should be n when not selected")
+
+    def select_and_verify_all(choice_name):
+        choice = c.named_choices[choice_name]
+
         # Select in forward order
-        for sym in choice_syms:
+        for sym in choice.syms:
             select_and_verify(sym)
+
         # Select in reverse order
-        for i in range(len(choice_syms) - 1, 0, -1):
-            select_and_verify(choice_syms[i])
+        for sym in reversed(choice.syms):
+            select_and_verify(sym)
 
-    def verify_mode(choice, no_modules_mode, modules_mode):
-        c["MODULES"].set_user_value("n")
-        choice_mode = choice.get_mode()
-        verify(choice_mode == no_modules_mode,
-               'Wrong mode for choice {0} with no modules. Expected "{1}", '
-               'got "{2}".'.format(choice.get_name(), no_modules_mode,
-                                   choice_mode))
+    def verify_mode(choice_name, no_modules_mode, modules_mode):
+        choice = c.named_choices[choice_name]
 
-        c["MODULES"].set_user_value("y")
-        choice_mode = choice.get_mode()
-        verify(choice_mode == modules_mode,
-               'Wrong mode for choice {0} with modules. Expected "{1}", '
-               'got "{2}".'.format(choice.get_name(), modules_mode,
-                                   choice_mode))
+        c.modules.set_value(0)
+        verify(choice.tri_value == no_modules_mode,
+               'Wrong mode for choice {} with no modules. Expected {}, got {}.'
+               .format(choice.name, no_modules_mode, choice.tri_value))
 
-    verify_mode(choice_bool, "y", "y")
-    verify_mode(choice_bool_opt, "n", "n")
-    verify_mode(choice_tristate, "y", "m")
-    verify_mode(choice_tristate_opt, "n", "n")
-    verify_mode(choice_bool_m, "n", "y") # Promoted
-    verify_mode(choice_tristate_m, "n", "m")
+        c.modules.set_value(2)
+        verify(choice.tri_value == modules_mode,
+               'Wrong mode for choice {} with modules. Expected {}, got {}.'
+               .format(choice.name, modules_mode, choice.tri_value))
+
+    verify_mode("BOOL",         2, 2)
+    verify_mode("BOOL_OPT",     0, 0)
+    verify_mode("TRISTATE",     2, 1)
+    verify_mode("TRISTATE_OPT", 0, 0)
+    verify_mode("BOOL_M",       0, 2)
+    verify_mode("TRISTATE_M",   0, 1)
 
     # Test defaults
 
-    c["TRISTATE_SYM"].set_user_value("n")
-    verify(choice_defaults.get_selection_from_defaults() is c["OPT_4"] and
-           choice_defaults.get_selection() is c["OPT_4"],
+    choice = c.named_choices["DEFAULTS"]
+
+    c.syms["TRISTATE_SYM"].set_value(0)
+    verify(choice.selection is c.syms["OPT_4"],
            "Wrong choice default with TRISTATE_SYM = n")
-    c["TRISTATE_SYM"].set_user_value("y")
-    verify(choice_defaults.get_selection_from_defaults() is c["OPT_2"] and
-           choice_defaults.get_selection() is c["OPT_2"],
+
+    c.syms["TRISTATE_SYM"].set_value(2)
+    verify(choice.selection is c.syms["OPT_2"],
            "Wrong choice default with TRISTATE_SYM = y")
-    c["OPT_1"].set_user_value("y")
-    verify(choice_defaults.get_selection_from_defaults() is c["OPT_2"],
-           "User selection changed default selection - shouldn't have")
-    verify(choice_defaults.get_selection() is c["OPT_1"],
+
+    c.syms["OPT_1"].set_value(2)
+    verify(choice.selection is c.syms["OPT_1"],
            "User selection should override defaults")
 
-    # Test "y" mode selection
+    verify(c.named_choices["DEFAULTS_NOT_VISIBLE"].selection
+           is c.syms["OPT_8"],
+           "Non-visible choice symbols should cause the next default to be "
+           "considered")
 
-    c["MODULES"].set_user_value("y")
+    # Test y mode selection
 
-    select_and_verify_all(choice_bool)
-    select_and_verify_all(choice_bool_opt)
-    select_and_verify_all(choice_tristate)
-    select_and_verify_all(choice_tristate_opt)
+    c.modules.set_value(2)
+
+    select_and_verify_all("BOOL")
+    select_and_verify_all("BOOL_OPT")
+    select_and_verify_all("TRISTATE")
+    select_and_verify_all("TRISTATE_OPT")
     # For BOOL_M, the mode should have been promoted
-    select_and_verify_all(choice_bool_m)
+    select_and_verify_all("BOOL_M")
 
-    # Test "m" mode selection...
+    # Test m mode selection
 
-    # ...for a choice that can also be in "y" mode
+    c.named_choices["TRISTATE"].set_value(1)
 
-    for sym_name in ("T_1", "T_2"):
-        assign_and_verify_new_value(sym_name, "m", "m")
-        verify(choice_tristate.get_mode() == "m",
-               'Selecting {0} to "m" should have changed the mode of the '
-               'choice to "m"'.format(sym_name))
+    verify(c.named_choices["TRISTATE"].tri_value == 1,
+           "TRISTATE choice should have mode m after explicit mode assignment")
 
-        assign_and_verify_new_value(sym_name, "y", "y")
-        verify(choice_tristate.get_mode() == "y" and
-               choice_tristate.get_selection() is c[sym_name],
-               'Selecting {0} to "y" should have changed the mode of the '
-               'choice to "y" and made it the selection'.format(sym_name))
+    assign_and_verify_value("T_1", 0, 0)
+    assign_and_verify_value("T_2", 0, 0)
+    assign_and_verify_value("T_1", 1, 1)
+    assign_and_verify_value("T_2", 1, 1)
+    assign_and_verify_value("T_1", 2, 1)
+    assign_and_verify_value("T_2", 2, 1)
 
-    # ...for a choice that can only be in "m" mode
-
-    for sym_name in ("TM_1", "TM_2"):
-        assign_and_verify_new_value(sym_name, "m", "m")
-        assign_and_verify_new_value(sym_name, "n", "n")
-        # "y" should be truncated
-        assign_and_verify_new_value(sym_name, "y", "m")
-        verify(choice_tristate_m.get_mode() == "m",
-               'A choice that can only be in "m" mode was not')
+    # Switching to y mode should cause T_2 to become selected
+    c.named_choices["TRISTATE"].set_value(2)
+    verify_value("T_1", 0)
+    verify_value("T_2", 2)
 
     # Verify that choices with no explicitly specified type get the type of the
     # first contained symbol with a type
 
-    verify(choice_no_type_bool.get_type() == kconfiglib.BOOL,
+    verify(c.named_choices["NO_TYPE_BOOL"].orig_type == BOOL,
            "Expected first choice without explicit type to have type bool")
-    verify(choice_no_type_tristate.get_type() == kconfiglib.TRISTATE,
+
+    verify(c.named_choices["NO_TYPE_TRISTATE"].orig_type == TRISTATE,
            "Expected second choice without explicit type to have type "
            "tristate")
 
     # Verify that symbols without a type in the choice get the type of the
     # choice
 
-    verify((c["MMT_1"].get_type(), c["MMT_2"].get_type(),
-            c["MMT_3"].get_type()) ==
-             (kconfiglib.BOOL, kconfiglib.BOOL, kconfiglib.TRISTATE),
-           "Wrong types for first choice with missing member types")
+    for name in "MMT_1", "MMT_2", "MMT_4", "MMT_5":
+        verify(c.syms[name].orig_type == BOOL,
+               "Expected {} to get type bool".format(name))
 
-    verify((c["MMT_4"].get_type(), c["MMT_5"].get_type()) ==
-             (kconfiglib.BOOL, kconfiglib.BOOL),
-           "Wrong types for second choice with missing member types")
+    verify(c.syms["MMT_3"].orig_type == TRISTATE,
+           "Expected MMT_3 to have type tristate")
 
-    #
-    # Object dependencies
-    #
+    # Verify that the default selection can change depending on the
+    # visibility of the choice symbols
 
-    print("Testing object dependencies...")
+    default_with_dep_choice = c.named_choices["DEFAULT_WITH_DEP"]
 
-    # Note: This tests an internal API
+    verify(default_with_dep_choice.selection is c.syms["B"],
+           "Wrong choice default with unsatisfied deps on default")
 
-    c = kconfiglib.Config("Kconfiglib/tests/Kdep")
+    c.syms["DEP"].set_value("y")
 
-    def verify_dependent(sym_name, deps_names):
-        sym = c[sym_name]
-        deps = [c[name] for name in deps_names]
-        sym_deps = sym._get_dependent()
-        verify(len(sym_deps) == len(deps),
-               "Wrong number of dependent symbols for {0}".format(sym_name))
-        verify(len(sym_deps) == len(set(sym_deps)),
-               "{0}'s dependencies contains duplicates".format(sym_name))
-        for dep in deps:
-            verify(dep in sym_deps, "{0} should depend on {1}".
-                                    format(dep.get_name(), sym_name))
+    verify(default_with_dep_choice.selection is c.syms["A"],
+           "Wrong choice default with satisfied deps on default")
 
-    # Test twice to cover dependency caching
-    for i in range(0, 2):
-        n_deps = 28
-        # Verify that D1, D2, .., D<n_deps> are dependent on D
-        verify_dependent("D", ["D{0}".format(i) for i in range(1, n_deps + 1)])
-        # Choices
-        verify_dependent("A", ["B", "C"])
-        verify_dependent("B", ["A", "C"])
-        verify_dependent("C", ["A", "B"])
-        verify_dependent("S", ["A", "B", "C"])
+    c.syms["DEP"].set_value("n")
 
-    # Verify that the last symbol depends on the first in a long chain of
-    # dependencies. Test twice to cover dependency caching.
+    verify(default_with_dep_choice.selection is c.syms["B"],
+           "Wrong choice default with unsatisfied deps on default (round two)")
 
-    c = kconfiglib.Config("Kconfiglib/tests/Kchain")
+    # Verify that symbols in choices that depend on the preceding symbol aren't
+    # considered choice symbols
 
-    for i in range(0, 2):
-        verify(c["CHAIN_23"] in c["CHAIN_1"]._get_dependent(),
-               "Dependency chain broken")
+    weird_choice = c.named_choices["WEIRD_SYMS"]
 
-    print("\nAll selftests passed\n" if _all_ok else
+    def verify_is_normal_choice_symbol(name):
+        sym = c.syms[name]
+        verify(sym.choice is not None and
+               sym in weird_choice.syms and
+               sym.nodes[0].parent.item is weird_choice,
+               "{} should be a normal choice symbol".format(sym.name))
+
+    def verify_is_weird_choice_symbol(name):
+        sym = c.syms[name]
+        verify(sym.choice is None and
+               sym not in weird_choice.syms,
+               "{} should be a weird (non-)choice symbol"
+               .format(sym.name))
+
+    verify_is_normal_choice_symbol("WS1")
+    verify_is_weird_choice_symbol("WS2")
+    verify_is_weird_choice_symbol("WS3")
+    verify_is_weird_choice_symbol("WS4")
+    verify_is_weird_choice_symbol("WS5")
+    verify_is_normal_choice_symbol("WS6")
+    verify_is_weird_choice_symbol("WS7")
+    verify_is_weird_choice_symbol("WS8")
+    verify_is_normal_choice_symbol("WS9")
+
+
+    print("Testing multi.def. property copying")
+
+    c = Kconfig("Kconfiglib/tests/Kdepcopy", warn=False)
+
+    def verify_props(desc, props, prop_names):
+        actual = [prop[0].name for prop in props]
+        expected = prop_names.split()
+
+        verify(actual == expected,
+               "Wrong {} properties, expected '{}', got '{}'"
+               .format(desc, expected, actual))
+
+    verify_props("default", c.syms["MULTIDEF"].defaults,
+                 "A B C D E F G H I J K L M N O P Q R")
+
+    verify_props("select", c.syms["MULTIDEF"].selects,
+                 "AA BB CC DD EE FF GG HH II JJ")
+
+    verify_props("imply", c.syms["MULTIDEF"].selects,
+                 "AA BB CC DD EE FF GG HH II JJ")
+
+    verify_props("select", c.syms["MULTIDEF_CHOICE"].selects,
+                 "A B C")
+
+    verify_props("range", c.syms["MULTIDEF_RANGE"].ranges,
+                 "A B C D E F")
+
+    verify_props("default", c.choices[1].defaults,
+                 "A B C D E")
+
+
+    print("Testing dependency loop detection")
+
+    # These are all expected to raise dependency loop errors
+    for i in range(11):
+        filename = "Kconfiglib/tests/Kdeploop" + str(i)
+        try:
+            Kconfig(filename)
+        except KconfigError as e:
+            if "Dependency loop" not in str(e):
+                fail("dependency loop in {} raised wrong KconfigError"
+                     .format(filename))
+        except:
+            fail("dependency loop in {} raised wrong exception"
+                 .format(filename))
+        else:
+            fail("dependency loop in {} not detected".format(filename))
+
+    # Check the most complicated message completely
+    try:
+        Kconfig("Kconfiglib/tests/Kdeploop10")
+    except KconfigError as e:
+        verify_equal(str(e), """
+Dependency loop
+===============
+
+A (defined at Kconfiglib/tests/Kdeploop10:1), with definition...
+
+config A
+	bool
+	depends on B
+
+...depends on B (defined at Kconfiglib/tests/Kdeploop10:5), with definition...
+
+config B
+	bool
+	depends on C = 7
+
+...depends on C (defined at Kconfiglib/tests/Kdeploop10:9), with definition...
+
+config C
+	int
+	range D 8
+
+...depends on D (defined at Kconfiglib/tests/Kdeploop10:13), with definition...
+
+config D
+	int
+	default 3 if E
+	default 8
+
+...depends on E (defined at Kconfiglib/tests/Kdeploop10:18), with definition...
+
+config E
+	bool
+
+(select-related dependencies: F && G)
+
+...depends on G (defined at Kconfiglib/tests/Kdeploop10:25), with definition...
+
+config G
+	bool
+	depends on H
+
+...depends on the choice symbol H (defined at Kconfiglib/tests/Kdeploop10:32), with definition...
+
+config H
+	bool
+	prompt "H" if I && <choice>
+	depends on I && <choice>
+
+...depends on the choice symbol I (defined at Kconfiglib/tests/Kdeploop10:41), with definition...
+
+config I
+	bool
+	prompt "I" if <choice>
+	depends on <choice>
+
+...depends on <choice> (defined at Kconfiglib/tests/Kdeploop10:38), with definition...
+
+choice
+	bool
+	prompt "choice" if J
+
+...depends on J (defined at Kconfiglib/tests/Kdeploop10:46), with definition...
+
+config J
+	bool
+	depends on A
+
+...depends again on A (defined at Kconfiglib/tests/Kdeploop10:1)
+"""[:-1])
+    except:
+        fail("Loop detection message check raised wrong exception")
+    else:
+        fail("Loop detection message check did not raise exception")
+
+
+    print("Testing preprocessor")
+
+    os.environ["ENV_1"] = "env_1"
+    os.environ["ENV_2"] = "env_2"
+    os.environ["ENV_3"] = "env_3"
+    os.environ["ENV_4"] = "env_4"
+    os.environ["ENV_5"] = "n"
+    os.environ["ENV_6"] = "Kconfiglib/tests/empty"
+    os.environ["ENV_7"] = "env_7"
+    # We verify warnings manually
+    c = Kconfig("Kconfiglib/tests/Kpreprocess", warn_to_stderr=False)
+
+    def verify_variable(name, unexp_value, exp_value, recursive):
+        var = c.variables[name]
+
+        verify(var.value == unexp_value,
+               "expected variable '{}' to have the unexpanded value '{}', had "
+               "the value '{}'".format(name, unexp_value, var.value))
+
+        verify(var.expanded_value == exp_value,
+               "expected variable '{}' to have the expanded value '{}', had "
+               "the value '{}'".format(name, exp_value, var.expanded_value))
+
+        verify(var.is_recursive == recursive,
+               "{} was {}, shouldn't be"
+               .format(name, "recursive" if var.is_recursive else "simple"))
+
+    verify_variable("simple-recursive", "foo", "foo", True)
+    verify_variable("simple-immediate", "bar", "bar", False)
+    verify_variable("simple-recursive-2", "baz", "baz", True)
+
+    verify_variable("whitespaced", "foo", "foo", True)
+
+    verify_variable("preserve-recursive", "foo bar", "foo bar", True)
+    verify_variable("preserve-immediate", "foo bar", "foo bar", False)
+
+    verify_variable("recursive",
+                    "$(foo) $(bar) $($(b-char)a$(z-char)) $(indir)",
+                    "abc def ghi jkl mno",
+                    True)
+
+    verify_variable("immediate", "foofoo", "foofoo", False)
+
+    verify_variable("messy-fn-res",
+                    "$($(fn-indir)-unused-arg, a  b , c  d )",
+                    'surround-rev-quote " c  d " " a  b " surround-rev-quote ',
+                    True)
+
+    verify_variable("special-chars-fn-res",
+                    "$(fn,$(comma)$(dollar)$(left-paren)foo$(right-paren))",
+                    '",$(foo)"',
+                    True)
+
+    verify_str(c.syms["PRINT_ME"], r"""
+config PRINT_ME
+	string
+	prompt "env_1" if (FOO && BAR) || !BAZ || !QAZ
+	default "\"foo\"" if "foo \"bar\" baz" = ""
+""")
+
+    verify_str(c.syms["PRINT_ME_TOO"], r"""
+config PRINT_ME_TOO
+	bool
+	prompt "foo"
+	default FOOBARBAZQAZ if QAZ && QAZFOO && xxx
+""")
+
+    def verify_recursive(name):
+        try:
+            c.variables[name].expanded_value
+        except KconfigError:
+            pass
+        else:
+            fail("Expected '{}' expansion to flag recursive expansion, didn't"
+                 .format(name))
+
+    verify_recursive("rec-1")
+    # Indirectly verifies that it's not recursive
+    verify_variable("safe-fn-rec-res",
+                    "$(safe-fn-rec,safe-fn-rec-2)",
+                    "foo",
+                    True)
+    verify_recursive("unsafe-fn-rec")
+
+    verify_variable("foo-bar-baz", "$(rhs)", "value", True)
+
+    verify_variable("space-var-res", "$(foo bar)", "value", True)
+
+    verify_variable("shell-res",
+                    "$(shell,false && echo foo bar || echo baz qaz)",
+                    "baz qaz",
+                    True)
+
+    verify_variable("shell-stderr-res", "", "", False)
+
+    verify_variable("location-res",
+                    "Kconfiglib/tests/Kpreprocess:125",
+                    "Kconfiglib/tests/Kpreprocess:125",
+                    False)
+
+    verify_variable("warning-res", "", "", False)
+    verify_variable("error-n-res", "", "", False)
+
+    try:
+        c.variables["error-y-res"].expanded_value
+    except KconfigError:
+        pass
+    else:
+        fail("expanding error-y-res didn't raise an exception")
+
+    # Check Kconfig.env_vars
+    verify_equal(c.env_vars,
+                 set(("ENV_1", "ENV_2", "ENV_3", "ENV_4", "ENV_5", "ENV_6")))
+
+    # Check that the expected warnings were generated
+    verify_equal(c.warnings, [
+        "Kconfiglib/tests/Kpreprocess:122: warning: 'echo message on stderr >&2' wrote to stderr: message on stderr",
+        "Kconfiglib/tests/Kpreprocess:130: warning: a warning"
+    ])
+
+
+    print("Testing KCONFIG_STRICT")
+
+    os.environ["KCONFIG_STRICT"] = "y"
+    c = Kconfig("Kconfiglib/tests/Kstrict", warn_to_stderr=False)
+
+    verify_equal("\n".join(c.warnings), """
+warning: the int symbol INT (defined at Kconfiglib/tests/Kstrict:8) has a non-int range [UNDEF_2 (undefined), 8 (undefined)]
+warning: undefined symbol UNDEF_1:
+
+- Referenced at Kconfiglib/tests/Kstrict:4:
+
+config BOOL
+	bool
+	prompt "foo" if DEF || !UNDEF_1
+	default UNDEF_2
+
+
+- Referenced at Kconfiglib/tests/Kstrict:19:
+
+menu "menu"
+	depends on UNDEF_1
+	visible if UNDEF_3
+
+warning: undefined symbol UNDEF_2:
+
+- Referenced at Kconfiglib/tests/Kstrict:4:
+
+config BOOL
+	bool
+	prompt "foo" if DEF || !UNDEF_1
+	default UNDEF_2
+
+
+- Referenced at Kconfiglib/tests/Kstrict:8:
+
+config INT
+	int
+	range UNDEF_2 8
+	range 5 15
+	default 10
+
+warning: undefined symbol UNDEF_3:
+
+- Referenced at Kconfiglib/tests/Kstrict:19:
+
+menu "menu"
+	depends on UNDEF_1
+	visible if UNDEF_3
+"""[1:])
+
+    os.environ.pop("KCONFIG_STRICT")
+
+
+    print("\nAll selftests passed\n" if all_passed else
           "\nSome selftests failed\n")
 
 def run_compatibility_tests():
-    """Runs tests on configurations from the kernel. Tests compability with the
-    C implementation by comparing outputs."""
+    """
+    Runs tests on configurations from the kernel. Tests compability with the
+    C implementation by comparing outputs.
+    """
+
+    # Referenced inside the kernel Kconfig files.
+    #
+    # The str() makes the type of the value 'str' on both Python 2 and Python 3,
+    # which is nice for some later dictionary key sanity checks.
+
+    os.environ["KERNELVERSION"] = str(
+        subprocess.check_output("make kernelversion", shell=True)
+            .decode("utf-8").rstrip()
+    )
+
+    os.environ["CC_VERSION_TEXT"] = str(
+        subprocess.check_output("gcc --version | head -n1", shell=True)
+            .decode("utf-8").rstrip()
+    )
+
+    os.environ["srctree"] = "."
+    os.environ["CC"] = "gcc"
+
+
+    if not os.path.exists("scripts/kconfig/conf"):
+        print("\nscripts/kconfig/conf does not exist -- running "
+              "'make allnoconfig' to build it...")
+        shell("make allnoconfig")
+
 
     print("Running compatibility tests...\n")
 
-    # The set of tests that want to run for all architectures in the kernel
-    # tree -- currently, all tests. The boolean flag indicates whether .config
-    # (generated by the C implementation) should be compared to ._config
-    # (generated by us) after each invocation.
-    all_arch_tests = [(test_config_absent,  True),
-                      (test_call_all,       False),
-                      (test_all_no,         True),
-                      (test_all_yes,        True),
-                      (test_all_no_simpler, True),
-                      # Needs to report success/failure for each arch/defconfig
-                      # combo, hence False.
-                      (test_defconfig,      False)]
+    test_fns = (test_defconfig,
+                # Fails for a few defconfigs due to a bug in the C tools. Will
+                # be enabled once patches get in.
+                #test_min_config,
+                test_alldefconfig,
+                test_allnoconfig,
+                test_allnoconfig_walk,
+                test_allmodconfig,
+                test_allyesconfig,
+                test_sanity)
 
-    print("Loading Config instances for all architectures...")
-    arch_configs = get_arch_configs()
-
-    if speedy_mode and not os.path.exists("scripts/kconfig/conf"):
-        print("\nscripts/kconfig/conf does not exist -- running "
-              "'make allnoconfig' to build it...")
-        for var in ("ARCH", "SRCARCH", "srctree"):
-            os.environ.pop(var, None)
-        shell("make allnoconfig")
-
-    first_arch_test = True
-
-    for (test_fn, compare_configs) in all_arch_tests:
-        if not first_arch_test:
-            print("\nUnsetting user values on all architecture Config "
-                  "instances prior to the next test...")
-            for arch in arch_configs:
-                arch.unset_user_values()
-        first_arch_test = False
-
+    for test_fn in test_fns:
         # The test description is taken from the docstring of the corresponding
         # function
         print(textwrap.dedent(test_fn.__doc__))
 
-        for conf in arch_configs:
+        for arch, srcarch in all_arch_srcarch():
+            # Referenced inside the Kconfig files
+            os.environ["ARCH"] = arch
+            os.environ["SRCARCH"] = srcarch
+
             rm_configs()
 
-            # This should be set correctly for any 'make *config' commands the
-            # test might run. SRCARCH is selected automatically from ARCH, so
-            # we don't need to set that.
-            os.environ["ARCH"] = conf.get_arch()
-            # This won't get set for us in speedy mode
-            if speedy_mode:
-                os.environ["SRCARCH"] = conf.get_srcarch()
+            test_fn(arch, srcarch)
 
-            test_fn(conf)
-
-            if compare_configs:
-                sys.stdout.write("  {0:<14}".format(conf.get_arch()))
-
-                if equal_confs():
-                    print("OK")
-                else:
-                    print("FAIL")
-                    fail()
-
-    if all_ok():
+    if all_passed:
         print("All selftests and compatibility tests passed")
-        print(nconfigs, "arch/defconfig pairs tested")
     else:
-        print("Some tests failed")
+        sys.exit("Some tests failed")
 
-def get_arch_configs():
-    """Returns a list with Config instances corresponding to all arch
-    Kconfigs."""
+def all_arch_srcarch():
+    for srcarch in os.listdir("arch"):
+        # arc and h8300 are currently broken with the C tools on linux-next as
+        # well. Perhaps they require cross-compilers to be installed.
+        #
+        # User-mode Linux has an unorthodox Kconfig setup that would require a
+        # different testing setup. Skip it too.
+        if srcarch in ("arc", "h8300", "um"):
+            continue
 
-    # TODO: Could this be made more robust across kernel versions by checking
-    # for the existence of particular arches?
+        if os.path.exists(os.path.join("arch", srcarch, "Kconfig")):
+            yield (srcarch, srcarch)
 
-    def add_arch(ARCH, res):
-        os.environ["SRCARCH"] = archdir
-        os.environ["ARCH"] = ARCH
-        print("  Loading {0}...".format(ARCH))
-        c = kconfiglib.Config(base_dir = ".")
-        res.append(c)
+    # Some arches define additional ARCH settings with ARCH != SRCARCH
+    # (search for "Additional ARCH settings for" in the top-level Makefile)
 
-    res = []
+    yield ("i386", "x86")
+    yield ("x86_64", "x86")
 
-    for archdir in os.listdir("arch"):
-        # No longer broken as of 3.7.0-rc8
-        #if archdir == "h8300":
-            # Broken Kconfig as of Linux 2.6.38-rc3
-            #continue
+    yield ("sparc32", "sparc")
+    yield ("sparc64", "sparc")
 
-        if os.path.exists(os.path.join("arch", archdir, "Kconfig")):
-            add_arch(archdir, res)
-            # Some arches define additional ARCH settings with ARCH != SRCARCH.
-            # (Search for "Additional ARCH settings for" in the Makefile.) We
-            # test those as well.
-            if archdir == "x86":
-                add_arch("i386", res)
-                add_arch("x86_64", res)
-            elif archdir == "sparc":
-                add_arch("sparc32", res)
-                add_arch("sparc64", res)
-            elif archdir == "sh":
-                add_arch("sh64", res)
-            elif archdir == "tile":
-                add_arch("tilepro", res)
-                add_arch("tilegx", res)
+    yield ("sh64", "sh")
 
-    # Don't want subsequent 'make *config' commands in tests to see this
-    del os.environ["ARCH"]
-    del os.environ["SRCARCH"]
-
-    return res
-
-# The weird docstring formatting is to get the format right when we print the
-# docstring ourselves
-def test_all_no(conf):
+def test_allnoconfig(arch, srcarch):
     """
-    Verify that our examples/allnoconfig.py script generates the same .config
-    as 'make allnoconfig', for each architecture. Runs the script via
-    'make scriptconfig', so kinda slow even in speedy mode."""
-
-    # TODO: Support speedy mode for running the script
-    shell("make scriptconfig SCRIPT=Kconfiglib/examples/allnoconfig.py "
-          "PYTHONCMD='{0}'".format(sys.executable))
+    Verify that allnoconfig.py generates the same .config as
+    'make allnoconfig', for each architecture. Runs the script via
+    'make scriptconfig'.
+    """
+    shell("make scriptconfig SCRIPT=Kconfiglib/allnoconfig.py "
+          "PYTHONCMD='{}'".format(sys.executable))
     shell("mv .config ._config")
-    if speedy_mode:
-        shell("scripts/kconfig/conf --allnoconfig Kconfig")
-    else:
-        shell("make allnoconfig")
+    shell("scripts/kconfig/conf --allnoconfig Kconfig")
 
-def test_all_no_simpler(conf):
+    compare_configs(arch)
+
+def test_allnoconfig_walk(arch, srcarch):
     """
-    Verify that our examples/allnoconfig_simpler.py script generates the same
-    .config as 'make allnoconfig', for each architecture. Runs the script via
-    'make scriptconfig', so kinda slow even in speedy mode."""
-
-    # TODO: Support speedy mode for running the script
-    shell("make scriptconfig SCRIPT=Kconfiglib/examples/allnoconfig_simpler.py "
-          "PYTHONCMD='{0}'".format(sys.executable))
+    Verify that examples/allnoconfig_walk.py generates the same .config as
+    'make allnoconfig', for each architecture. Runs the script via
+    'make scriptconfig'.
+    """
+    shell("make scriptconfig SCRIPT=Kconfiglib/examples/allnoconfig_walk.py "
+          "PYTHONCMD='{}'".format(sys.executable))
     shell("mv .config ._config")
-    if speedy_mode:
-        shell("scripts/kconfig/conf --allnoconfig Kconfig")
-    else:
-        shell("make allnoconfig")
+    shell("scripts/kconfig/conf --allnoconfig Kconfig")
 
-def test_all_yes(conf):
+    compare_configs(arch)
+
+def test_allmodconfig(arch, srcarch):
     """
-    Verify that our examples/allyesconfig.py script generates the same .config
-    as 'make allyesconfig', for each architecture. Runs the script via
-    'make scriptconfig', so kinda slow even in speedy mode."""
-
-    # TODO: Support speedy mode for running the script
-    shell("make scriptconfig SCRIPT=Kconfiglib/examples/allyesconfig.py "
-          "PYTHONCMD='{0}'".format(sys.executable))
+    Verify that allmodconfig.py generates the same .config as
+    'make allmodconfig', for each architecture. Runs the script via
+    'make scriptconfig'.
+    """
+    shell("make scriptconfig SCRIPT=Kconfiglib/allmodconfig.py "
+          "PYTHONCMD='{}'".format(sys.executable))
     shell("mv .config ._config")
-    if speedy_mode:
-        shell("scripts/kconfig/conf --allyesconfig Kconfig")
-    else:
-        shell("make allyesconfig")
+    shell("scripts/kconfig/conf --allmodconfig Kconfig")
 
-def test_call_all(conf):
+    compare_configs(arch)
+
+def test_allyesconfig(arch, srcarch):
     """
-    Call all public methods on all symbols, menus, choices, and comments for
-    all architectures to make sure we never crash or hang. (Nearly all public
-    methods: some are hard to test like this, but are exercised by other
-    tests.) Also do misc. sanity checks."""
-    print("  For {0}...".format(conf.get_arch()))
+    Verify that allyesconfig.py generates the same .config as
+    'make allyesconfig', for each architecture. Runs the script via
+    'make scriptconfig'.
+    """
+    shell("make scriptconfig SCRIPT=Kconfiglib/allyesconfig.py "
+          "PYTHONCMD='{}'".format(sys.executable))
+    shell("mv .config ._config")
+    shell("scripts/kconfig/conf --allyesconfig Kconfig")
 
-    conf.__str__()
-    conf.get_arch()
-    conf.get_base_dir()
-    conf.get_config_filename()
-    conf.get_config_header()
-    conf.get_defconfig_filename()
-    conf.get_kconfig_filename()
-    conf.get_mainmenu_text()
-    conf.get_srcarch()
-    conf.get_srctree()
-    conf.get_symbol("y")
-    conf.get_symbols(False)
-    conf.get_top_level_items()
-    conf.set_print_undef_assign(True)
-    conf.set_print_undef_assign(False)
-    conf.set_print_warnings(False)
-    conf.set_print_warnings(True)
-    conf.unset_user_values()
+    compare_configs(arch)
 
-    conf.eval("y && ARCH")
+def test_sanity(arch, srcarch):
+    """
+    Do sanity checks on each configuration and call all public methods on all
+    symbols, choices, and menu nodes for all architectures to make sure we
+    never crash or hang.
+    """
+    print("For {}...".format(arch))
 
-    for s in conf.get_symbols():
-        s.__str__()
-        s.get_assignable_values()
-        s.get_config()
-        s.get_help()
-        s.get_lower_bound()
-        s.get_name()
-        s.get_parent()
-        s.get_prompts()
-        s.get_ref_locations()
-        s.get_referenced_symbols()
-        s.get_referenced_symbols(True)
-        s.get_selected_symbols()
-        s.get_type()
-        s.get_upper_bound()
-        s.get_user_value()
-        s.get_value()
-        s.get_visibility()
-        s.has_ranges()
-        s.is_choice_selection()
-        s.is_choice_symbol()
-        s.is_defined()
-        s.is_from_environment()
-        s.is_modifiable()
-        s.is_allnoconfig_y()
-        s.unset_user_value()
+    kconf = Kconfig()
 
-        # Check get_ref/def_location() sanity
+    for sym in kconf.defined_syms:
+        verify(sym._visited == 2,
+               "{} has broken dependency loop detection (_visited = {})"
+               .format(sym.name, sym._visited))
 
-        if s.is_special():
-            if s.is_from_environment():
-                # Special symbols from the environment should have define
-                # locations
-                verify(s.get_def_locations() != [],
-                       "The symbol '{0}' is from the environment but lacks "
-                       "define locations".format(s.get_name()))
-            else:
-                # Special symbols that are not from the environment should be
-                # defined and have no define locations
-                verify(s.is_defined(),
-                       "The special symbol '{0}' is not defined".
-                       format(s.get_name()))
-                verify(s.get_def_locations() == [],
-                       "The special symbol '{0}' has recorded def. locations".
-                       format(s.get_name()))
+    kconf.modules
+    kconf.defconfig_list
+    kconf.defconfig_filename
+    kconf.enable_redun_warnings()
+    kconf.disable_redun_warnings()
+    kconf.enable_undef_warnings()
+    kconf.disable_undef_warnings()
+    kconf.enable_warnings()
+    kconf.disable_warnings()
+    kconf.enable_stderr_warnings()
+    kconf.disable_stderr_warnings()
+    kconf.mainmenu_text
+    kconf.unset_values()
+
+    kconf.write_autoconf("/dev/null")
+
+    # No tempfile.TemporaryDirectory in Python 2
+    tmpdir = tempfile.mkdtemp()
+    kconf.sync_deps(os.path.join(tmpdir, "deps"))  # Create
+    kconf.sync_deps(os.path.join(tmpdir, "deps"))  # Update
+    shutil.rmtree(tmpdir)
+
+    # Python 2/3 compatible
+    for key, sym in kconf.syms.items():
+        verify(isinstance(key, str), "weird key '{}' in syms dict".format(key))
+
+        verify(not sym.is_constant, sym.name + " in 'syms' and constant")
+
+        verify(sym not in kconf.const_syms,
+               sym.name + " in both 'syms' and 'const_syms'")
+
+        for dep in sym._dependents:
+            verify(not dep.is_constant,
+                   "the constant symbol {} depends on {}"
+                   .format(dep.name, sym.name))
+
+        sym.__repr__()
+        sym.__str__()
+        sym.assignable
+        kconf.disable_warnings()
+        sym.set_value(2)
+        sym.set_value("foo")
+        sym.unset_value()
+        kconf.enable_warnings()
+        sym.str_value
+        sym.tri_value
+        sym.type
+        sym.user_value
+        sym.visibility
+
+    for sym in kconf.defined_syms:
+        verify(sym.nodes, sym.name + " is defined but lacks menu nodes")
+
+        verify(not (sym.orig_type not in (BOOL, TRISTATE) and sym.choice),
+               sym.name + " is a choice symbol but not bool/tristate")
+
+    for key, sym in kconf.const_syms.items():
+        verify(isinstance(key, str),
+               "weird key '{}' in const_syms dict".format(key))
+
+        verify(sym.is_constant,
+               '"{}" is in const_syms but not marked constant'
+               .format(sym.name))
+
+        verify(not sym.nodes,
+               '"{}" is constant but has menu nodes'.format(sym.name))
+
+        verify(not sym._dependents,
+               '"{}" is constant but is a dependency of some symbol'
+               .format(sym.name))
+
+        verify(not sym.choice,
+               '"{}" is constant and a choice symbol'.format(sym.name))
+
+        sym.__repr__()
+        sym.__str__()
+        sym.assignable
+        kconf.disable_warnings()
+        sym.set_value(2)
+        sym.set_value("foo")
+        sym.unset_value()
+        kconf.enable_warnings()
+        sym.str_value
+        sym.tri_value
+        sym.type
+        sym.visibility
+
+    for choice in kconf.choices:
+        for sym in choice.syms:
+            verify(sym.choice is choice,
+                   "{0} is in choice.syms but 'sym.choice' is not the choice"
+                   .format(sym.name))
+
+            verify(sym.type in (BOOL, TRISTATE),
+                   "{} is a choice symbol but is not a bool/tristate"
+                   .format(sym.name))
+
+        choice.__str__()
+        choice.__repr__()
+        choice.str_value
+        choice.tri_value
+        choice.user_value
+        choice.assignable
+        choice.selection
+        choice.type
+        choice.visibility
+
+    # Menu nodes
+
+    node = kconf.top_node
+
+    while 1:
+        # Everything else should be well exercised elsewhere
+        node.__repr__()
+        node.__str__()
+        verify(isinstance(node.item, (Symbol, Choice)) or \
+               node.item in (MENU, COMMENT),
+               "'{}' appeared as a menu item".format(node.item))
+
+        if node.list is not None:
+            node = node.list
+
+        elif node.next is not None:
+            node = node.next
+
         else:
-            # Non-special symbols should have define locations iff they are
-            # defined
-            if s.is_defined():
-                verify(s.get_def_locations() != [],
-                       "'{0}' defined but lacks recorded locations".
-                       format(s.get_name()))
+            while node.parent is not None:
+                node = node.parent
+                if node.next is not None:
+                    node = node.next
+                    break
             else:
-                verify(s.get_def_locations() == [],
-                       "'{0}' undefined but has recorded locations".
-                       format(s.get_name()))
-                verify(s.get_ref_locations() != [],
-                       "'{0}' both undefined and unreferenced".
-                       format(s.get_name()))
+                break
 
-    for c in conf.get_choices():
-        c.__str__()
-        c.get_config()
-        c.get_def_locations()
-        c.get_help()
-        c.get_items()
-        c.get_mode()
-        c.get_name()
-        c.get_parent()
-        c.get_prompts()
-        c.get_referenced_symbols()
-        c.get_referenced_symbols(True)
-        c.get_selection()
-        c.get_selection_from_defaults()
-        c.get_symbols()
-        c.get_type()
-        c.get_user_selection()
-        c.get_visibility()
-        c.is_optional()
-
-    for m in conf.get_menus():
-        m.__str__()
-        m.get_config()
-        m.get_items()
-        m.get_items(True)
-        m.get_location()
-        m.get_parent()
-        m.get_referenced_symbols()
-        m.get_referenced_symbols(True)
-        m.get_symbols()
-        m.get_symbols(True)
-        m.get_title()
-        m.get_visibility()
-        m.get_visible_if_visibility()
-
-    for c in conf.get_comments():
-        c.__str__()
-        c.get_config()
-        c.get_location()
-        c.get_parent()
-        c.get_referenced_symbols()
-        c.get_referenced_symbols(True)
-        c.get_text()
-        c.get_visibility()
-
-def test_config_absent(conf):
+def test_alldefconfig(arch, srcarch):
     """
-    Verify that Kconfiglib generates the same .config as 'make alldefconfig',
-    for each architecture."""
-    conf.write_config("._config")
-    if speedy_mode:
-        shell("scripts/kconfig/conf --alldefconfig Kconfig")
-    else:
-        shell("make alldefconfig")
+    Verify that alldefconfig.py generates the same .config as
+    'make alldefconfig', for each architecture. Runs the script via
+    'make scriptconfig'.
+    """
+    shell("make scriptconfig SCRIPT=Kconfiglib/alldefconfig.py "
+          "PYTHONCMD='{}'".format(sys.executable))
+    shell("mv .config ._config")
+    shell("scripts/kconfig/conf --alldefconfig Kconfig")
 
-def test_defconfig(conf):
+    compare_configs(arch)
+
+def test_defconfig(arch, srcarch):
     """
     Verify that Kconfiglib generates the same .config as scripts/kconfig/conf,
     for each architecture/defconfig pair. In obsessive mode, this test includes
@@ -2122,89 +2825,104 @@ def test_defconfig(conf):
     run.
 
     With logging enabled, this test appends any failures to a file
-    test_defconfig_fails in the root."""
+    test_defconfig_fails in the root.
+    """
+    kconf = Kconfig()
 
-    global nconfigs
-    defconfigs = []
+    if obsessive:
+        defconfigs = []
 
-    def add_configs_for_arch(arch):
-        arch_dir = os.path.join("arch", arch)
-        # Some arches have a "defconfig" in the root of their arch/<arch>/
-        # directory
-        root_defconfig = os.path.join(arch_dir, "defconfig")
-        if os.path.exists(root_defconfig):
-            defconfigs.append(root_defconfig)
-        # Assume all files in the arch/<arch>/configs directory (if it
-        # exists) are configurations
-        defconfigs_dir = os.path.join(arch_dir, "configs")
-        if not os.path.exists(defconfigs_dir):
-            return
-        if not os.path.isdir(defconfigs_dir):
-            print("Warning: '{0}' is not a directory - skipping"
-                  .format(defconfigs_dir))
-            return
-        for dirpath, _, filenames in os.walk(defconfigs_dir):
-            for filename in filenames:
-                defconfigs.append(os.path.join(dirpath, filename))
-
-    if obsessive_mode:
         # Collect all defconfigs. This could be done once instead, but it's
         # a speedy operation comparatively.
-        for arch in os.listdir("arch"):
-            add_configs_for_arch(arch)
+        for srcarch_ in os.listdir("arch"):
+            defconfigs.extend(defconfig_files(srcarch_))
     else:
-        add_configs_for_arch(conf.get_arch())
+        defconfigs = defconfig_files(srcarch)
 
     # Test architecture for each defconfig
 
     for defconfig in defconfigs:
         rm_configs()
 
-        nconfigs += 1
+        kconf.load_config(defconfig)
+        kconf.write_config("._config")
+        shell("scripts/kconfig/conf --defconfig='{}' Kconfig".
+              format(defconfig))
 
-        conf.load_config(defconfig)
-        conf.write_config("._config")
-        if speedy_mode:
-            shell("scripts/kconfig/conf --defconfig='{0}' Kconfig".
-                  format(defconfig))
+        arch_defconfig_str = "  {:14}with {:60} ".format(arch, defconfig)
+
+        if equal_configs():
+            print(arch_defconfig_str + "OK")
         else:
-            shell("cp {0} .config".format(defconfig))
-            # It would be a bit neater if we could use 'make *_defconfig'
-            # here (for example, 'make i386_defconfig' loads
-            # arch/x86/configs/i386_defconfig' if ARCH = x86/i386/x86_64),
-            # but that wouldn't let us test nonsensical combinations of
-            # arches and defconfigs, which is a nice way to find obscure
-            # bugs.
-            shell("make kconfiglibtestconfig")
-
-        sys.stdout.write("  {0:<14}with {1:<60} ".
-                         format(conf.get_arch(), defconfig))
-
-        if equal_confs():
-            print("OK")
-        else:
-            print("FAIL")
+            print(arch_defconfig_str + "FAIL")
             fail()
-            if log_mode:
+            if log:
                 with open("test_defconfig_fails", "a") as fail_log:
-                    fail_log.write("{0}  {1} with {2} did not match\n"
-                            .format(time.strftime("%d %b %Y %H:%M:%S",
-                                                  time.localtime()),
-                                    conf.get_arch(),
-                                    defconfig))
+                    fail_log.write("{} with {} did not match\n"
+                                   .format(arch, defconfig))
+
+def test_min_config(arch, srcarch):
+    """
+    Verify that Kconfiglib generates the same .config as 'make savedefconfig'
+    for each architecture/defconfig pair.
+    """
+    kconf = Kconfig()
+
+    if obsessive_min_config:
+        defconfigs = []
+        for srcarch_ in os.listdir("arch"):
+            defconfigs.extend(defconfig_files(srcarch_))
+    else:
+        defconfigs = defconfig_files(srcarch)
+
+    for defconfig in defconfigs:
+        rm_configs()
+
+        kconf.load_config(defconfig)
+        kconf.write_min_config("._config")
+
+        shell("cp {} .config".format(defconfig))
+
+        shell("scripts/kconfig/conf --savedefconfig=.config Kconfig")
+
+        arch_defconfig_str = "  {:14}with {:60} ".format(arch, defconfig)
+
+        if equal_configs():
+            print(arch_defconfig_str + "OK")
+        else:
+            print(arch_defconfig_str + "FAIL")
 
 #
 # Helper functions
 #
 
-devnull = open(os.devnull, "w")
+def defconfig_files(srcarch):
+    # Yields a list of defconfig file filenames for a particular srcarch
+    # subdirectory (arch/<srcarch>/)
 
-def shell(cmd):
-    subprocess.call(cmd, shell = True, stdout = devnull, stderr = devnull)
+    srcarch_dir = os.path.join("arch", srcarch)
+
+    # Some arches have a defconfig in the root of their arch/<arch>/ directory
+    root_defconfig = os.path.join(srcarch_dir, "defconfig")
+    if os.path.exists(root_defconfig):
+        yield root_defconfig
+
+    # Assume all files in the arch/<arch>/configs/ directory (if it exists) are
+    # configurations
+    defconfigs_dir = os.path.join(srcarch_dir, "configs")
+
+    if not os.path.isdir(defconfigs_dir):
+        return
+
+    for dirpath, _, filenames in os.walk(defconfigs_dir):
+        for filename in filenames:
+            yield os.path.join(dirpath, filename)
 
 def rm_configs():
-    """Delete any old ".config" (generated by the C implementation) and
-    "._config" (generated by us), if present."""
+    """
+    Delete any old ".config" (generated by the C implementation) and
+    "._config" (generated by us), if present.
+    """
     def rm_if_exists(f):
         if os.path.exists(f):
             os.remove(f)
@@ -2212,44 +2930,47 @@ def rm_configs():
     rm_if_exists(".config")
     rm_if_exists("._config")
 
-def equal_confs():
-    with open(".config") as menu_conf:
-        l1 = menu_conf.readlines()
+def compare_configs(arch):
+    if equal_configs():
+        print("{:14}OK".format(arch))
+    else:
+        print("{:14}FAIL".format(arch))
+        fail()
 
-    with open("._config") as my_conf:
-        l2 = my_conf.readlines()
+def equal_configs():
+    with open(".config") as f:
+        their = f.readlines()
 
-    # Skip the header generated by 'conf'
-    unset_re = r"# CONFIG_(\w+) is not set"
+    # Strip the header generated by 'conf'
     i = 0
-    for line in l1:
+    for line in their:
         if not line.startswith("#") or \
-           re.match(unset_re, line):
+           re.match(r"# CONFIG_(\w+) is not set", line):
             break
         i += 1
+    their = their[i:]
 
-    return l1[i:] == l2
+    try:
+        f = open("._config")
+    except IOError as e:
+        if e.errno != errno.ENOENT:
+            raise
+        print("._config not found. Did you forget to apply the Makefile patch?")
+        return False
+    else:
+        with f:
+            # [1:] strips the default header
+            our = f.readlines()[1:]
 
-_all_ok = True
+    if their == our:
+        return True
 
-def verify(cond, msg):
-    """Fails and prints 'msg' if 'cond' is False."""
-    if not cond:
-        fail(msg)
+    # Print a unified diff to help debugging
+    print("Mismatched .config's! Unified diff:")
+    sys.stdout.writelines(difflib.unified_diff(their, our, fromfile="their",
+                                               tofile="our"))
 
-def verify_equals(x, y):
-    """Fails if 'x' does not equal 'y'."""
-    if x != y:
-        fail("'{0}' does not equal '{1}'".format(x, y))
-
-def fail(msg = None):
-    global _all_ok
-    if msg is not None:
-        print("Fail: " + msg)
-    _all_ok = False
-
-def all_ok():
-    return _all_ok
+    return False
 
 if __name__ == "__main__":
     run_tests()
