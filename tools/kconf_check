@@ -412,13 +412,31 @@ TMP_FILE="${LOGDIR}/.config"
 for CFG in $(sed -n "$SED_CONFIG_EXP" $TMP_FILE); do
     REQUESTED_VAL=$(grep -w -e "$CFG" $TMP_FILE)
     ACTUAL_VAL=$(grep -w -e "$CFG" ${dot_config})
+
+    # special case. If someone asked for # CONFIG_FOO is not set and CONFIG_FOO
+    # doesn't appear in the final .config, this is not a mismatch .. it is a
+    # variant of what they wanted. This allows common fragments to set things,
+    # but for a specific BSP to cleanly override them (without declaring them as
+    # "non hw") when you know dependencies won't be met.
+    asked_for_not_set=
+    log_mismatch=t
+    echo "$REQUESTED_VAL" | grep -q "is not set"
+    if [ $? -eq 0 ]; then
+        asked_for_not_set=t
+    fi
+
     if [ "x$REQUESTED_VAL" != "x$ACTUAL_VAL" ] ; then
-        echo "Config: $CFG" >> ${LOGDIR}/mismatch.txt
-        echo "From: ${CONFIGMAP[$CFG]}" >> ${LOGDIR}/mismatch.txt
-        echo "Requested value:  $REQUESTED_VAL" >> ${LOGDIR}/mismatch.txt
-        echo "Actual value:     $ACTUAL_VAL" >> ${LOGDIR}/mismatch.txt
-        echo "" >> ${LOGDIR}/mismatch.txt
-        echo $CFG >> ${LOGDIR}/mismatch.cfg
+        if [ -n "$asked_for_not_set" ] && [ "$ACTUAL_VAL" = "" ]; then
+            log_mismatch=
+        fi
+        if [ -n "${log_mismatch}" ]; then
+            echo "Config: $CFG" >> ${LOGDIR}/mismatch.txt
+            echo "From: ${CONFIGMAP[$CFG]}" >> ${LOGDIR}/mismatch.txt
+            echo "Requested value:  $REQUESTED_VAL" >> ${LOGDIR}/mismatch.txt
+            echo "Actual value:     $ACTUAL_VAL" >> ${LOGDIR}/mismatch.txt
+            echo "" >> ${LOGDIR}/mismatch.txt
+            echo $CFG >> ${LOGDIR}/mismatch.cfg
+        fi
     fi
 done
 
