@@ -2,7 +2,7 @@
 
 # Kconfig symbol analsysis
 #
-# Copyright (C) 2016 Bruce Ashfield
+# Copyright (C) 2018 Bruce Ashfield
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 as
@@ -136,6 +136,8 @@ if not os.path.exists( dotconfig ):
 #  - KERNELVERSION
 #  - SRCARCH
 #  - ARCH
+#  - srctree
+#  - CC
 #
 # If SRCARCH isn't set, but ARCH is, we simply make SRCARCH=ARCH, but
 # other missing variables are an error
@@ -182,57 +184,182 @@ if verbose:
     print( "[INFO]: src arch: " + os.getenv("SRCARCH") )
     print( "[INFO]: arch: " + os.getenv("ARCH") )
 
+def _is_num(name):
+    # Heuristic to see if a symbol name looks like a number, for nicer output
+    # when printing expressions. Things like 16 are actually symbol names, only
+    # they get their name as their value when the symbol is undefined.
+
+    try:
+        int(name)
+    except ValueError:
+        if not name.startswith(("0x", "0X")):
+            return False
+
+        try:
+            int(name, 16)
+        except ValueError:
+            return False
+
+    return True
+
+def _name_and_val_str(sc):
+    # Custom symbol printer that shows the symbol value after the symbol, used
+    # for the information display
+
+    # Show the values of non-constant (non-quoted) symbols that don't look like
+    # numbers. Things like 123 are actually symbol references, and only work as
+    # expected due to undefined symbols getting their name as their value.
+    # Showing the symbol value for those isn't helpful though.
+    if isinstance(sc, kconfiglib.Symbol) and \
+       not sc.is_constant and \
+       not _is_num(sc.name):
+
+        if not sc.nodes:
+            # Undefined symbol reference
+            return "{}(undefined/n)".format(sc.name)
+
+        return '{}(={})'.format(sc.name, sc.str_value)
+
+    # For other symbols, use the standard format
+    return standard_sc_expr_str(sc)
+
+def _expr_str(expr):
+    # Custom expression printer that shows symbol values
+    return kconfiglib.expr_str(expr, _name_and_val_str)
+
+def _split_expr_info(expr, indent):
+    # Returns a string with 'expr' split into its top-level && or || operands,
+    # with one operand per line, together with the operand's value. This is
+    # usually enough to get something readable for long expressions. A fancier
+    # recursive thingy would be possible too.
+    #
+    # indent:
+    #   Number of leading spaces to add before the split expression.
+
+    if len(kconfiglib.split_expr(expr, kconfiglib.AND)) > 1:
+        split_op = kconfiglib.AND
+        op_str = "&&"
+    else:
+        split_op = kconfiglib.OR
+        op_str = "||"
+
+    s = ""
+    for i, term in enumerate(kconfiglib.split_expr(expr, split_op)):
+        s += "{}{} {}".format(" "*indent,
+                              "  " if i == 0 else op_str,
+                              _expr_str(term))
+
+        # Don't bother showing the value hint if the expression is just a
+        # single symbol. _expr_str() already shows its value.
+        if isinstance(term, tuple):
+            s += "  (={})".format(kconfiglib.TRI_TO_STR[kconfiglib.expr_value(term)])
+
+        s += "\n"
+
+    return s
+
+def _direct_dep_info(sc):
+    # Returns a string describing the direct dependencies of 'sc' (Symbol or
+    # Choice). The direct dependencies are the OR of the dependencies from each
+    # definition location. The dependencies at each definition location come
+    # from 'depends on' and dependencies inherited from parent items.
+
+    return 'Direct dependencies (={}):\n{}' \
+        .format(kconfiglib.TRI_TO_STR[kconfiglib.expr_value(sc.direct_dep)], _split_expr_info(sc.direct_dep, 2))
+
+def referencing_nodes(node, sym):
+    # Returns a list of all menu nodes that reference 'sym' in any of their
+    # properties or property conditions
+
+    res = []
+
+    while node:
+        if sym in node.referenced:
+            res.append(node)
+
+        if node.list:
+            res.extend(referencing_nodes(node.list, sym))
+
+        node = node.next
+
+    return res
+
 # Create a Config object representing a Kconfig configuration. (Any number of
-# these can be created -- the library has no global state.)
-conf = kconfiglib.Config(kconf)
+# these can be created -- the library has no global state.
+show_errors = False
+if verbose:
+    show_errors = True
+
+conf = kconfiglib.Kconfig( kconf, show_errors, show_errors )
 
 # Load values from a .config file.
 conf.load_config( dotconfig )
 
-opt = conf[option]
+if option not in conf.syms:
+    print("No symbol {} exists in the configuration".format(option))
+    sys.exit(0)
+
+opt = conf.syms[option]
+nodes = referencing_nodes(conf.top_node, conf.syms[option])
+if not nodes:
+    print("No reference to {} found".format(option))
+    sys.exit(0)
 
 if show_summary:
-    print(conf[option])
+    sym=conf.syms[option]
+    print(sym)
+    print("  Value: " + sym.str_value)
+    print("  Visibility: " + kconfiglib.TRI_TO_STR[sym.visibility])
+    print("  Currently assignable values: " +
+          ", ".join([kconfiglib.TRI_TO_STR[v] for v in sym.assignable]))
+
+    for node in sym.nodes:
+        print("  defined at {}:{}".format(node.filename, node.linenr))
 
 if show_vars:
     print( "" )
     print( "Variables that depend on '%s':" % option )
 
-    for sym in conf:
+    for sym in conf.syms:
         if opt in sym.get_referenced_symbols():
             print("    " + sym.get_name())
 
 if show_prompt:
     print( "Prompt for '%s': %s" % (option,opt.get_prompts()) )
 
-refs = opt.get_referenced_symbols()
-selected = opt.get_selected_symbols()
+refs = opt.referenced
+deps = opt.direct_dep
+imps = opt.implies
+selected = opt.selects
+selected_names = []
+for s in selected:
+    selected_names.append(s[0].name)
+
+#print(opt.direct_dep)
+#print(_direct_dep_info(opt))
+# for s in selected:
+#     s is the tuple
+#     print(s)
+#     print(s[0].name)
+
 if show_selected:
-    for sel in selected:
-        print( sel.get_name() )
+     for sel in selected:
+         print(s[0].name)
 
 if show_conditions:
-    print("Config '%s' has the following conditionals: " % option )
-    prompts_str_rows = []
-    #for conditional, cond_expr in opt.orig_prompts:
-    for val_expr, cond_expr in opt.orig_def_exprs:
-        # row_str = conf._expr_val_str(val_expr, "(none)")
-        # prompts_str_rows.append( row_str )
-        prompts_str_rows.append( conf._expr_val_str(cond_expr) )
-
-    for conditional, cond_expr in opt.orig_prompts:
-        prompts_str_rows.append( conf._expr_val_str(cond_expr) )
-
-    print "  " + '\n'.join(prompts_str_rows)
-
-    # if it is a referenced variable, but not selected, then it is a dependency
     depends_string=""
-    for s in refs:
-        if not s in selected:
-            depends_string += " " + s.get_name() + " [" + s.get_value() + "]"
+    dep_string = _direct_dep_info(opt)
+    dep_string = dep_string.replace('\n', ' ').replace('\r', '')
+    dep_string = ' '.join(dep_string.split())
+    dep_string = dep_string.replace(':', ':\n       ')
+    print("  Config '%s' has the following %s" % (option, dep_string))
 
-    print( "Dependency values are: " )
-    print( " %s" % depends_string )
+    for s in refs:
+        if not s.name in selected_names:
+            depends_string += " " + s.name + " [" + s.str_value + "]"
+    if verbose:
+        print( "  Dependency values are: " )
+        print( "    %s" % depends_string )
 
 if show_value:
     print( "Config '%s' has value: %s" % (option, opt.get_value()))
