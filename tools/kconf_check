@@ -276,6 +276,7 @@ fi
 #
 if [ -n "${verbose}" ]; then
     echo "[INFO]: creating merged config"
+    echo "        merge_config.sh -O ${LOGDIR} -m ${configs_abs}"
 fi
 merge_config.sh -O ${LOGDIR} -m ${configs_abs} &> ${LOGDIR}/merge_config_audit.log
 
@@ -345,7 +346,7 @@ if [ -n "${metadata}" ]; then
     if [ -s "${metadata}/non-hardware_frags.txt" ]; then
         for i in `cat ${metadata}/non-hardware_frags.txt` ; do
             cat $i | \
-                grep '^\(# \)\{0,1\}CONFIG_[a-zA-Z0-9_]*[=\( is not set\)]' | \
+                grep -e '^\(# \)\{0,1\}CONFIG_[a-zA-Z0-9_]*[=\( is not set\)]' -e '^\(# \)\{0,1\}CONFIG_[a-zA-Z0-9_]*' | \
                 sed 's/^\(# \)\{0,1\}\(CONFIG_[a-zA-Z0-9_]*\)[= ].*/\2/' \
                     >> $LOGDIR/input_nonhardware_configs.cfg~
         done
@@ -516,7 +517,7 @@ if [ -s $LOGDIR/mismatch.txt ]; then
 
                 # drop CONFIG_ from the symbol name, since symbol_why doesn't expect it.
                 opt_to_check=$(echo $opt | sed 's%CONFIG_%%')
-                ARCH=x86 symbol_why.py --dotconfig=${dot_config} --ksrc="." --conditions $opt_to_check >> $LOGDIR/mismatch.txt
+                srctree=. CC=gcc ARCH=x86 symbol_why.py --dotconfig=${dot_config} --ksrc="." --conditions $opt_to_check >> $LOGDIR/mismatch.txt
                 echo "" >> $LOGDIR/mismatch.txt
             fi
         done
