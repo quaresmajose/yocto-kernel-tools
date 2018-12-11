@@ -241,7 +241,7 @@ find ${kernel_source} \
 # known list of all Kconfig* files.  Again, must filter dups.
 rm -f ${LOGDIR}/all.cfg
 for i in `cat ${LOGDIR}/all.kcf` ; do
-    cat ${kernel_source}/$i | grep '^[ 	]*\(menu\)*config ' | \
+    cat ${kernel_source}/$i | grep '^[ 	]*\(menu\)*config\s' | \
 	awk '{print "CONFIG_"$2}' >> ${LOGDIR}/all.cfg
 done
 mv -f ${LOGDIR}/all.cfg ${LOGDIR}/all.cfg~
