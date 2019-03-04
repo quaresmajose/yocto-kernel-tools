@@ -640,6 +640,10 @@ do
 		echo 1 > $tmp_dir/next
 		echo t > $tmp_dir/utf8
 
+		echo "GIT_AUTHOR_NAME='$GIT_AUTHOR_NAME'"   > $tmp_dir/author-script
+		echo "GIT_AUTHOR_EMAIL='$GIT_AUTHOR_EMAIL'" >> $tmp_dir/author-script
+		echo "GIT_AUTHOR_DATE='$GIT_AUTHOR_DATE'"  >> $tmp_dir/author-script
+
 		# also copied from git-am.sh
 		git rev-parse --verify -q HEAD > $tmp_dir/abort-safety
 
