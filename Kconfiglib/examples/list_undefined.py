@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: ISC
+#
 # Prints a list of symbols that are referenced in the Kconfig files of some
 # architecture but not defined by the Kconfig files of any architecture.
 #

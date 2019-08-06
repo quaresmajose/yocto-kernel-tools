@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: ISC
+#
 # Prints menu entries as a tree with its value in the .config file. This can be
 # handy e.g. for diffing between different .config files or versions of Kconfig files.
 #

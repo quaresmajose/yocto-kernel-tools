@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: ISC
+#
 # Evaluates an expression (e.g. "X86_64 || (X86_32 && X86_LOCAL_APIC)") in the
 # context of a configuration. Note that this always yields a tristate value (n,
 # m, or y).

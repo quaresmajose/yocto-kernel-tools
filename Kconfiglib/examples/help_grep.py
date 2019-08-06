@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: ISC
+#
 # Does a case-insensitive search for a regular expression in the help texts of
 # symbols and choices and the prompts of menus and comments. Prints the
 # matching items together with their locations and the matching text.

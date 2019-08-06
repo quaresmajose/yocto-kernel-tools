@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: ISC
+#
 # Prints all menu nodes that reference a given symbol any of their properties
 # or property conditions, along with their parent menu nodes.
 #

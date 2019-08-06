@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: ISC
+#
 # Prints the menu tree of the configuration. Dependencies between symbols can
 # sometimes implicitly alter the menu structure (see kconfig-language.txt), and
 # that's implemented too.

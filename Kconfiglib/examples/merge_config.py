@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: ISC
+#
 # This script functions similarly to scripts/kconfig/merge_config.sh from the
 # kernel tree, merging multiple configurations fragments to produce a complete
 # .config, with unspecified values filled in as for alldefconfig.

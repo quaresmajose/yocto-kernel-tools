@@ -1,3 +1,7 @@
+#
+# SPDX-License-Identifier: ISC
+#
+
 import io
 import os
 import setuptools

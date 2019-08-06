@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: ISC
+#
 # Implements a simple configuration interface on top of Kconfiglib to
 # demonstrate concepts for building a menuconfig-like. Emulates how the
 # standard menuconfig prints menu entries.

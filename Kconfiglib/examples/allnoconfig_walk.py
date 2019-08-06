@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: ISC
+#
 # This is tree-walking version of allnoconfig.py, for demonstration purposes.
 # Verified by the test suite to generate identical output to 'make allnoconfig'
 # for all ARCHes.

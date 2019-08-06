@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: ISC
+#
 # Loads a Kconfig and a .config and prints a symbol.
 #
 # Usage:

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: ISC
 
 # Runs the test suite and all examples scripts with Python 2 and Python 3,
 # bailing immediately if anything fails. For the examples that aren't tested in

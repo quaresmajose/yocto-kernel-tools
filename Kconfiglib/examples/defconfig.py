@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: ISC
+#
 # Works like entering "make menuconfig" and immediately saving and exiting
 #
 # Usage:

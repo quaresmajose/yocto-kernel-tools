@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: ISC
+#
 # Produces exactly the same output as the following script:
 #
 # make defconfig
