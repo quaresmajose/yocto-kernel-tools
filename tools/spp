@@ -125,6 +125,7 @@ strip_common_prefix()
 	if [ $this_len -lt $out_len ]; then
 	    relocated_name=$t
 	    out_len=$this_len
+	    break
 	fi
 	# add a trailing slash to get corner cases where one may
 	# have been added or not dropped
@@ -133,6 +134,7 @@ strip_common_prefix()
 	if [ $this_len -lt $out_len ]; then
 	    relocated_name=$t
 	    out_len=$this_len
+	    break
 	fi
     done
 
@@ -296,6 +298,16 @@ search_include_paths()
 infiles=$@
 
 processed_files=""
+
+# this function also removes duplicated lines by `sort -u`
+sort_by_len_dec()
+{
+        for i in $@; do
+                echo $i
+        done | sort -u | awk '{ print length($0) " " $0; }' | sort -nr | cut -d ' ' -f 2-
+}
+
+include_paths=$(sort_by_len_dec $include_paths)
 
 ##
 ## create variables for use in scripts
