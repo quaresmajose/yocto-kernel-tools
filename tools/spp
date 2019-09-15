@@ -120,7 +120,7 @@ strip_common_prefix()
     out_len=${#in_name}
     relocated_name=$in_name
     for r in $include_paths; do
-	t=`echo $in_name | sed s%$r%%`
+	t=${in_name/$r}
 	this_len=${#t}
 	if [ $this_len -lt $out_len ]; then
 	    relocated_name=$t
@@ -129,7 +129,8 @@ strip_common_prefix()
 	fi
 	# add a trailing slash to get corner cases where one may
 	# have been added or not dropped
-	t=`echo $in_name/ | sed s%$r%%`
+	t=$in_name/
+	t=${t/$r}
 	this_len=${#t}
 	if [ $this_len -lt $out_len ]; then
 	    relocated_name=$t
@@ -468,7 +469,6 @@ process_file()
     local kconf_type
     local kconf_name
     local arg1
-    local OLDIFS
     local fline
     local include_name
     local inhibit_cfg
@@ -497,7 +497,7 @@ process_file()
 
             # output the name, and exit
             relative_patch=$(strip_common_prefix $patch_name)
-            containing_dir=$(echo ${patch_name} | sed "s%${relative_patch}%%")
+            containing_dir=${patch_name/$relative_patch}
             echo "prefix ${containing_dir}"
             echo "patch \"${patch_name_new}\""
             return
@@ -511,7 +511,7 @@ process_file()
                 exit 1
             fi
             relative_kconf=$(strip_common_prefix $kconf_name)
-            containing_dir=$(echo ${kconf_name} | sed "s%${relative_kconf}%%")
+            containing_dir=${kconf_name/$relative_kconf}
             echo "prefix ${containing_dir}"
             echo "kconf non-hardware ${kconf_name_new}"
             return
@@ -525,7 +525,7 @@ process_file()
                 exit 1
             fi
             relative_kconf=$(strip_common_prefix $kconf_name)
-            containing_dir=$(echo ${kconf_name} | sed "s%${relative_kconf}%%")
+            containing_dir=${kconf_name/$relative_kconf}
             echo "prefix ${containing_dir}"
             echo "kconf non-hardware ${kconf_name_new}"
             return
@@ -554,27 +554,26 @@ process_file()
         in=`readlink -f $in`
     fi
 
-    echo "$processed_files" | grep -q "$in"
-    if [ $? -eq 0 ]; then
+    if [[ "$processed_files" =~ $in ]]; then
         echo "# NOTE: feature `basename $in` has already been processed"
     fi
     processed_files="$processed_files $in"
 
 
-    OLDIFS=$IFS
-    IFS='
-'
     echo "# --> file: $in"
     echo "# flags: $flags"
     echo "mark `basename $in` start"
 
-    for fline in `cat $in`; do
-        done=""
+    while read
+    do
+        fline=$REPLY
+
+        [[ $fline ]] || continue
 
         # include
-        echo $fline | grep -q "^[[:space:]]*include"
-        if [ $? -eq 0 ]; then
-            include_name=`echo $fline | cut -f2 -d' '`
+        if [[ $fline =~ ^[[:space:]]*include ]]; then
+            set $fline
+            include_name=$2
 
             # if we were called with inhibit flags, passing them along is
             # the default
@@ -584,16 +583,13 @@ process_file()
             # if we have a "nocfg" or "nopatch" on the include directive,
             # then we need to set the variables so they'll be passed down to
             # the nested process call
-            echo "$fline" | grep -q "[[:space:]]\+nocfg"
-            if [ $? -eq 0 ]; then
+            if [[ $fline =~ [[:space:]]+nocfg ]]; then
                 inhibit_cfg=nocfg
             fi
-            echo "$fline" | grep -q "[[:space:]]\+nopatch"
-            if [ $? -eq 0 ]; then
+            if [[ $fline =~ [[:space:]]+nopatch ]]; then
                 inhibit_patch=nopatch
             fi
 
-            IFS=$OLDIFS
             process_file $include_name $in $inhibit_cfg $inhibit_patch
             ret=$?
             if [ $ret -eq 1 ]; then
@@ -608,36 +604,27 @@ process_file()
             if [ -z "$inherited_inhibit_patch" ]; then
                 inhibit_patch=""
             fi
-
-            done=t
-            IFS='
-'
+            continue
         fi
 
         ## preprocessor define
-        echo $fline | grep -q "^[[:space:]]*#define"
-        local define_ret=$?
-        if [ -z "$done" ] && [ $define_ret -eq 0 ]; then
-            IFS=$OLDIFS
-            local define_name=`echo $fline | cut -f2 -d' '`
-            local define_value=`echo $fline | cut -f3 -d' '`
+        if [[ $fline =~ ^[[:space:]]*#define ]]; then
+            set $fline
+            local define_name=$2
+            local define_value=$3
             if [ -z "$define_value" ]; then
                 define_value=t
             fi
 
             define $define_name $define_value
 
-            IFS='
-'
-            done=t
+            continue
         fi
 
         ## patch
-        echo $fline | grep -q -e "^[[:space:]]*patch"
-        local patch_ret=$?
-        if [ -z "$done" ] && [ $patch_ret -eq 0 ]; then
-            IFS=$OLDIFS
-            local patch_name=`echo $fline | cut -f2 -d' '`
+        if [[ $fline =~ ^[[:space:]]*patch ]]; then
+            set $fline
+            local patch_name=$2
 
             if [ -n "$inherited_inhibit_patch" ]; then
                 echo "# inhibited patch"
@@ -656,30 +643,26 @@ process_file()
 
                 # output the patch
                 relative_patch=$(strip_common_prefix $patch_name)
-                containing_dir=$(echo ${patch_name} | sed "s%${relative_patch}%%")
+                containing_dir=${patch_name/$relative_patch}
                 echo "prefix ${containing_dir}"
                 echo "patch \"${patch_name}\""
             fi
 
-            IFS='
-'
-            done=t
+            continue
         fi
 
         ## kconf
-        echo $fline | grep -q -e "^[[:space:]]*kconf" -e "^force[[:space:]]*kconf"
-        local kconf_ret=$?
-        if [ -z "$done" ] && [ $kconf_ret -eq 0 ]; then
-            IFS=$OLDIFS
-            arg1=`echo $fline | cut -f1 -d' '`
+        if [[ $fline =~ ^[[:space:]]*kconf || $fline =~ ^force[[:space:]]*kconf ]]; then
+            set $fline
+            arg1=$1
             if [ "$arg1" = "force" ]; then
                 # "force" will insist that its config be processed
-                kconf_type=`echo $fline | cut -f3 -d' '`
-                kconf_name=`echo $fline | cut -f4 -d' '`
+                kconf_type=$3
+                kconf_name=$4
             else
                 arg1=""
-                kconf_type=`echo $fline | cut -f2 -d' '`
-                kconf_name=`echo $fline | cut -f3 -d' '`
+                kconf_type=$2
+                kconf_name=$3
             fi
 
             if [ -n "$inherited_inhibit_cfg" ] && [ -z "$arg1" ]; then
@@ -704,19 +687,17 @@ process_file()
 
                 # output the kconfig
                 relative_kconf=$(strip_common_prefix $kconf_name)
-                containing_dir=$(echo ${kconf_name} | sed "s%${relative_kconf}%%")
+                containing_dir=${kconf_name/$relative_kconf}
                 echo "prefix ${containing_dir}"
                 echo "kconf $kconf_type ${kconf_name} # $arg1"
             fi
-            IFS='
-'
-            done=t
+
+            continue
         fi
-        if [ -z "$done" ]; then
-            echo "$fline"
-        fi
-    done
-    IFS=$OLDIFS
+
+        echo "$fline"
+
+    done < $in
 
     echo "mark `basename $in` end"
     echo "# <-- done file: $in"

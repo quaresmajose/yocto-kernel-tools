@@ -16,7 +16,7 @@ patch() {
     relative_patch_name=${patch_name}
     relative_patch_dir=""
     if [ -n "${prefix}" ]; then
-        relative_patch_name=$(echo ${relative_patch_name} | sed "s%${prefix}%%")
+        relative_patch_name=${relative_patch_name/$prefix}
         relative_patch_dir=$(dirname ${relative_patch_name})
         mkdir -p ${outdir}/patches/${cbranch_name}/${relative_patch_dir}
     fi
