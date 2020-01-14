@@ -564,9 +564,9 @@ process_file()
     echo "# flags: $flags"
     echo "mark `basename $in` start"
 
-    while read
+    while read line || [ -n "$line" ];
     do
-        fline=$REPLY
+        fline=$line
 
         [[ $fline ]] || continue
 
