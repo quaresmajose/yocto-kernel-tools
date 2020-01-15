@@ -1,15 +1,18 @@
-# SPDX-License-Identifier: ISC
-#
 # This is tree-walking version of allnoconfig.py, for demonstration purposes.
 # Verified by the test suite to generate identical output to 'make allnoconfig'
 # for all ARCHes.
+#
+# Note: A more practical version would use Kconfig.node_iter(). The manual tree
+# walking is for demonstration purposes.
 #
 # Usage for the Linux kernel:
 #
 #   $ make [ARCH=<arch>] scriptconfig SCRIPT=Kconfiglib/examples/allnoconfig_walk.py
 
-from kconfiglib import Kconfig, Symbol
 import sys
+
+from kconfiglib import Kconfig, Symbol
+
 
 def do_allnoconfig(node):
     global changed
@@ -38,6 +41,7 @@ def do_allnoconfig(node):
 
         node = node.next
 
+
 # Parse the Kconfig files
 kconf = Kconfig(sys.argv[1])
 
@@ -59,4 +63,4 @@ while True:
     if not changed:
         break
 
-kconf.write_config(".config")
+print(kconf.write_config())

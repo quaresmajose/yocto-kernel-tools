@@ -1,5 +1,3 @@
-# SPDX-License-Identifier: ISC
-#
 # Produces exactly the same output as the following script:
 #
 # make defconfig
@@ -14,26 +12,28 @@
 #
 #   $ make [ARCH=<arch>] scriptconfig SCRIPT=Kconfiglib/examples/defconfig_oldconfig.py
 
-import kconfiglib
 import sys
+
+import kconfiglib
+
 
 kconf = kconfiglib.Kconfig(sys.argv[1])
 
 # Mirrors defconfig
 kconf.load_config("arch/x86/configs/x86_64_defconfig")
-kconf.write_config(".config")
+kconf.write_config()
 
 # Mirrors the first oldconfig
-kconf.load_config(".config")
+kconf.load_config()
 kconf.syms["ETHERNET"].set_value(0)
-kconf.write_config(".config")
+kconf.write_config()
 
 # Mirrors the second oldconfig
-kconf.load_config(".config")
+kconf.load_config()
 kconf.syms["ETHERNET"].set_value(2)
 for s in kconf.unique_defined_syms:
     if s.user_value is None and 0 in s.assignable:
         s.set_value(0)
 
 # Write the final configuration
-kconf.write_config(".config")
+print(kconf.write_config())

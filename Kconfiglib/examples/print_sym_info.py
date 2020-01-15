@@ -1,5 +1,3 @@
-# SPDX-License-Identifier: ISC
-#
 # Loads a Kconfig and a .config and prints a symbol.
 #
 # Usage:
@@ -22,21 +20,23 @@
 # 	  useful for infrequently used options which are not required
 # 	  for booting.  For more information, see the man pages for
 # 	  modprobe, lsmod, modinfo, insmod and rmmod.
-# 	  
+#
 # 	  If you say Y here, you will need to run "make
 # 	  modules_install" to put the modules under /lib/modules/
 # 	  where modprobe can find them (you may need to be root to do
 # 	  this).
-# 	  
+#
 # 	  If unsure, say Y.
-# 
+#
 # value = n
 # visibility = y
 # currently assignable values: n, y
 # defined at init/Kconfig:1674
 
-from kconfiglib import Kconfig, TRI_TO_STR
 import sys
+
+from kconfiglib import Kconfig, TRI_TO_STR
+
 
 if len(sys.argv) < 3:
     sys.exit('Pass symbol name (without "CONFIG_" prefix) with SCRIPT_ARG=<name>')

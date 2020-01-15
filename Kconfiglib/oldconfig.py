@@ -1,37 +1,42 @@
 #!/usr/bin/env python
 
-# Copyright (c) 2018, Ulf Magnusson
+# Copyright (c) 2018-2019, Ulf Magnusson
 # SPDX-License-Identifier: ISC
 
-# Implements oldconfig functionality:
-#
-#   1. Load existing .config
-#   2. Prompt the user for the value of all modifiable symbols/choices that
-#      aren't already set in the .config
-#   3. Write new .config
-#
-# Unlike 'make oldconfig', this script doesn't print menu titles and comments,
-# but gives Kconfig definition locations. Printing menus and comments would be
-# pretty easy to add: Look at the parents of each item and print all menu
-# prompts and comments unless they have already been printed (assuming you want
-# to skip "irrelevant" menus).
-#
-# Entering '?' displays the help text of the symbol/choice, if any.
+"""
+Implements oldconfig functionality.
 
+  1. Loads existing .config
+  2. Prompts for the value of all modifiable symbols/choices that
+     aren't already set in the .config
+  3. Writes an updated .config
+
+The default input/output filename is '.config'. A different filename can be
+passed in the KCONFIG_CONFIG environment variable.
+
+When overwriting a configuration file, the old version is saved to
+<filename>.old (e.g. .config.old).
+
+Entering '?' displays the help text of the symbol/choice, if any.
+
+Unlike 'make oldconfig', this script doesn't print menu titles and comments,
+but gives Kconfig definition locations. Printing menus and comments would be
+pretty easy to add: Look at the parents of each item, and print all menu
+prompts and comments unless they have already been printed (assuming you want
+to skip "irrelevant" menus).
+"""
 from __future__ import print_function
 
-import os
 import sys
 
-from kconfiglib import Kconfig, Symbol, Choice, BOOL, TRISTATE, HEX, \
-                       standard_kconfig, standard_config_filename
+from kconfiglib import Symbol, Choice, BOOL, TRISTATE, HEX, standard_kconfig
+
 
 # Python 2/3 compatibility hack
 if sys.version_info[0] < 3:
     input = raw_input
 
 
-# Note: Used as the entry point in setup.py
 def _main():
     # Earlier symbols in Kconfig files might depend on later symbols and become
     # visible if their values change. This flag is set to True if the value of
@@ -39,14 +44,8 @@ def _main():
     # visible symbols.
     global conf_changed
 
-    kconf = standard_kconfig()
-
-    config_filename = standard_config_filename()
-    if not os.path.exists(config_filename):
-        sys.exit("{}: '{}' not found".format(sys.argv[0], config_filename))
-
-
-    kconf.load_config(config_filename)
+    kconf = standard_kconfig(__doc__)
+    print(kconf.load_config())
 
     while True:
         conf_changed = False
@@ -57,9 +56,7 @@ def _main():
         if not conf_changed:
             break
 
-    kconf.write_config(config_filename)
-
-    print("Updated configuration written to '{}'".format(config_filename))
+    print(kconf.write_config())
 
 
 def oldconfig(node):
@@ -102,8 +99,8 @@ def oldconfig(node):
         # (for the default value)
         while True:
             val = input("{} ({}) [{}] ".format(
-                            node.prompt[0], _name_and_loc_str(sym),
-                            _default_value_str(sym)))
+                node.prompt[0], _name_and_loc_str(sym),
+                _default_value_str(sym)))
 
             if val == "?":
                 _print_help(node)

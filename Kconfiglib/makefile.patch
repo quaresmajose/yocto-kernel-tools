@@ -1,22 +1,22 @@
-From 01899aa5e6d1f33e1965d7934bea2ff97a48bc89 Mon Sep 17 00:00:00 2001
+From 93daf46f309b0c8f86149ef58c4906387d054c22 Mon Sep 17 00:00:00 2001
 From: Ulf Magnusson <ulfalizer@gmail.com>
 Date: Tue, 9 Jun 2015 13:01:34 +0200
-Subject: [PATCH] Kconfiglib scripts/kconfig/Makefile patch.
+Subject: [PATCH] Kconfiglib scripts/kconfig/Makefile patch
 
 ---
- scripts/kconfig/Makefile | 35 +++++++++++++++++++++++++++++++++++
- 1 file changed, 35 insertions(+)
+ scripts/kconfig/Makefile | 29 +++++++++++++++++++++++++++++
+ 1 file changed, 29 insertions(+)
 
 diff --git a/scripts/kconfig/Makefile b/scripts/kconfig/Makefile
-index 8c12c20c55a6..88c618b34915 100644
+index 3f327e21f60e..8b7dd1292005 100644
 --- a/scripts/kconfig/Makefile
 +++ b/scripts/kconfig/Makefile
-@@ -27,1 +27,36 @@ gconfig: $(obj)/gconf
-+PHONY += scriptconfig iscriptconfig kconfiglibtestconfig
+@@ -27,2 +27,31 @@ gconfig: $(obj)/gconf
+ 
++PHONY += scriptconfig iscriptconfig kmenuconfig guiconfig dumpvarsconfig
 +
-+ifneq ($(filter scriptconfig iscriptconfig,$(MAKECMDGOALS)),)
 +PYTHONCMD ?= python
-+endif
++kpython := PYTHONPATH=$(srctree)/Kconfiglib:$$PYTHONPATH $(PYTHONCMD)
 +
 +ifneq ($(filter scriptconfig,$(MAKECMDGOALS)),)
 +ifndef SCRIPT
@@ -25,29 +25,24 @@ index 8c12c20c55a6..88c618b34915 100644
 +endif
 +
 +scriptconfig:
-+ifdef SCRIPT_ARG
-+	$(Q)PYTHONPATH="$(srctree)/Kconfiglib:$$PYTHONPATH" \
-+	  "$(PYTHONCMD)" "$(SCRIPT)" $(Kconfig) "$(SCRIPT_ARG)"
-+else
-+	$(Q)PYTHONPATH="$(srctree)/Kconfiglib:$$PYTHONPATH" \
-+	  "$(PYTHONCMD)" "$(SCRIPT)" $(Kconfig)
-+endif
++	$(Q)$(kpython) $(SCRIPT) $(Kconfig) $(if $(SCRIPT_ARG),"$(SCRIPT_ARG)")
 +
 +iscriptconfig:
-+	$(Q)PYTHONPATH="$(srctree)/Kconfiglib:$$PYTHONPATH" "$(PYTHONCMD)" -i -c \
++	$(Q)$(kpython) -i -c \
 +	  "import kconfiglib; \
-+	   import sys; \
-+	   kconf = kconfiglib.Kconfig(sys.argv[4 if \"$(PYTHONCMD)\".startswith(\"ipython\") else 1]); \
-+	   print(\"A Kconfig instance 'kconf' for the architecture $(ARCH) has been created.\")" \
-+	  $(Kconfig)
++	   kconf = kconfiglib.Kconfig('$(Kconfig)'); \
++	   print('A Kconfig instance \'kconf\' for the architecture $(ARCH) has been created.')"
 +
-+# Used by testsuite.py to be able to compare output for nonsensical
-+# arch/defconfig combinations, which has proven effective for finding obscure
-+# bugs
-+kconfiglibtestconfig: $(obj)/conf
-+	$(Q)$< --defconfig=.config $(Kconfig)
++kmenuconfig:
++	$(Q)$(kpython) $(srctree)/Kconfiglib/menuconfig.py $(Kconfig)
++
++guiconfig:
++	$(Q)$(kpython) $(srctree)/Kconfiglib/guiconfig.py $(Kconfig)
++
++dumpvarsconfig:
++	$(Q)$(kpython) $(srctree)/Kconfiglib/examples/dumpvars.py $(Kconfig)
 +
  menuconfig: $(obj)/mconf
 -- 
-2.14.1
+2.20.1
 

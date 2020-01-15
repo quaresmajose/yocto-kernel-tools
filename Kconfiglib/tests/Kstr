@@ -36,12 +36,17 @@ if DEP3
 
 menu "foo"
     depends on DEP4
+    visible if VIS
 
 config ADVANCED
     help
       second help text
     depends on A || !B || (C && D) || !(E && F) || G = H || \
               (I && !J && (K || L) && !(M || N) && O = P)
+
+config ADVANCED
+    # Used to verify that the direct dependencies appear to the right of VIS
+    prompt "prompt 4"
 
 endmenu
 
@@ -196,3 +201,93 @@ config ADVANCED_COMMENT_HOOK
 comment "advanced comment"
     depends on A
     depends on B
+
+# Corner cases when removing direct dependencies
+
+config DEP_REM_CORNER_CASES
+    bool
+    default A
+    depends on n
+
+config DEP_REM_CORNER_CASES
+    default B if n
+
+config DEP_REM_CORNER_CASES
+    default C
+    depends on m
+
+config DEP_REM_CORNER_CASES
+    default D if A && y
+    depends on y
+
+config DEP_REM_CORNER_CASES
+    default E if !E1
+    default F if F1 = F2
+    default G if G1 || H1
+    depends on !H
+
+config DEP_REM_CORNER_CASES
+    default H
+    depends on "foo" = "bar"
+
+menu "menu"
+    visible if FOO || BAR
+
+config DEP_REM_CORNER_CASES
+    prompt "prompt"
+    depends on BAZ && QAZ
+
+endmenu
+
+# Only prompt, no type
+config PROMPT_ONLY
+    prompt "prompt only"
+
+# {Symbol,Choice}.orig_*
+
+if BASE_DEP
+
+config BOOL_SYM_ORIG
+    bool
+    default D1 if DEP
+    default D2
+    select S1
+    select S2 if DEP
+    imply I1
+    imply I1
+
+config BOOL_SYM_ORIG
+    default D3
+    select S3
+    imply I3 if DEP
+
+config INT_SYM_ORIG
+    int
+    range 1 2 if DEP
+    range 3 4
+
+config INT_SYM_ORIG
+    range 5 6 if DEP
+
+choice CHOICE_ORIG
+    bool "choice orig"
+    default A
+    default B if DEP
+
+config A
+    bool
+
+config B
+    bool
+
+endchoice
+
+choice CHOICE_ORIG
+    default C if DEP
+
+config C
+    bool
+
+endchoice
+
+endif

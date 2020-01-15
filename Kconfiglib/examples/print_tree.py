@@ -1,5 +1,3 @@
-# SPDX-License-Identifier: ISC
-#
 # Prints the menu tree of the configuration. Dependencies between symbols can
 # sometimes implicitly alter the menu structure (see kconfig-language.txt), and
 # that's implemented too.
@@ -43,11 +41,14 @@
 #     config GENERIC_IRQ_PROBE
 #   ...
 
-from kconfiglib import Kconfig, Symbol, Choice, MENU, COMMENT
 import sys
 
+from kconfiglib import Kconfig, Symbol, Choice, MENU, COMMENT
+
+
 def indent_print(s, indent):
-    print(" "*indent + s)
+    print(indent*" " + s)
+
 
 def print_items(node, indent):
     while node:
@@ -68,6 +69,7 @@ def print_items(node, indent):
             print_items(node.list, indent + 2)
 
         node = node.next
+
 
 kconf = Kconfig(sys.argv[1])
 print_items(kconf.top_node, 0)
