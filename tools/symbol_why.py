@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
 #
 
@@ -223,7 +223,7 @@ def _name_and_val_str(sc):
         return '{}(={})'.format(sc.name, sc.str_value)
 
     # For other symbols, use the standard format
-    return standard_sc_expr_str(sc)
+    return kconfiglib.standard_sc_expr_str(sc)
 
 def _expr_str(expr):
     # Custom expression printer that shows symbol values
@@ -358,6 +358,8 @@ if show_conditions:
 
     for s in refs:
         if not s.name in selected_names:
+            if not s.name:
+                s.name = "choice"
             depends_string += " " + s.name + " [" + s.str_value + "]"
     if verbose:
         print( "  Dependency values are: " )
