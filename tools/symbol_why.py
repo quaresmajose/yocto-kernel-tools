@@ -493,6 +493,11 @@ def split_option( config_option_str ):
                 opt = "invalid option format"
                 val = option
 
+        # a fully commented line, is not an option and val ..
+        elif re.search(r"^#.*$", option ):
+            opt = None
+            val = None
+
         elif re.search( r".*= *", option):
             # space after equals
             opt = "invalid option format"
