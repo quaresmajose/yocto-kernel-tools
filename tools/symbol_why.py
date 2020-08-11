@@ -482,7 +482,7 @@ def split_option( config_option_str ):
         opt = m.group(1)
         val = m.group(2)
     except:
-        if re.search( "^#.*CONFIG_", option ):
+        if re.search( "^#\s*CONFIG_", option ):
             # print( "option is a is not set!!! %s" % option )
             m = re.match(r"# (CONFIG_[^ ]+) is not set", option )
             if m:
