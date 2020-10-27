@@ -521,7 +521,7 @@ def blame_analysis( option, val, blame_string, mismatch, show_only_mismatch, use
     # temp
     # verbose = True
     if use_classifiers:
-        if o_noprefix in non_hw_dict:
+        if (o_noprefix in non_hw_dict) and (not o_noprefix in hw_dict):
             if verbose:
                 print( "[INFO]: mismatch on non-required config found (call without --clasify for details)" )
 
