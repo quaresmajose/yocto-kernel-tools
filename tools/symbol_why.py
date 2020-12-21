@@ -521,9 +521,15 @@ def blame_analysis( option, val, blame_string, mismatch, show_only_mismatch, use
     # temp
     # verbose = True
     if use_classifiers:
+        if verbose:
+            if o_noprefix in non_hw_dict:
+                print( "[DBG]: option %s is non-hw %s" % (o_noprefix,non_hw_dict[o_noprefix]) )
+            if o_noprefix in hw_dict:
+                print( "[DBG]: option %s is hw %s" % (o_noprefix,hw_dict[o_noprefix]) )
+
         if (o_noprefix in non_hw_dict) and (not o_noprefix in hw_dict):
             if verbose:
-                print( "[INFO]: mismatch on non-required config found (call without --clasify for details)" )
+                print( "[INFO]: mismatch on non-required config found (call without --classify for details)" )
 
             return
 
@@ -618,6 +624,16 @@ def config_queue_read( config_queue_file ):
                             o_noprefix = re.sub( "^CONFIG_", "", m.group(1) )
                             hw_class_dict[o_noprefix.rstrip()] = str(hardware_cfg.resolve())
 
+                            # being in both h/w and non-hardware leads us to results where we
+                            # can't easily silence a warning. So if we've added it to h/w we need
+                            # remove it from non-hardware. If we do it in both the hardware and
+                            # non hardware cases, the end result is that the last classification
+                            # wins, which is what we want.
+                            try:
+                                del non_hw_class_dict[o_noprefix.rstrip()]
+                            except:
+                                pass
+
             if non_hardware_cfg.exists() and use_classifiers:
                 with open( str(non_hardware_cfg) ) as classification_file:
                     for cline in classification_file:
@@ -625,7 +641,15 @@ def config_queue_read( config_queue_file ):
                         if m:
                             o_noprefix = re.sub( "^CONFIG_", "", m.group(1) )
                             non_hw_class_dict[o_noprefix.rstrip()] = str(non_hardware_cfg.resolve())
-
+                            # being in both h/w and non-hardware leads us to results where we
+                            # can't easily silence a warning. So if we've added it to h/w we need
+                            # remove it from non-hardware. If we do it in both the hardware and
+                            # non hardware cases, the end result is that the last classification
+                            # wins, which is what we want.
+                            try:
+                                del hw_class_dict[o_noprefix.rstrip()]
+                            except:
+                                pass
 
             if non_hardware_classification.exists() and use_classifiers:
                 if verbose:
@@ -639,9 +663,30 @@ def config_queue_read( config_queue_file ):
                                     m = re.match( r"^(menu).*config (\w*)", kline )
                                     if m:
                                         non_hw_class_dict[m.group(2)] = classification_file.name
+
+                                        # being in both h/w and non-hardware leads us to results where we
+                                        # can't easily silence a warning. So if we've added it to h/w we need
+                                        # remove it from non-hardware. If we do it in both the hardware and
+                                        # non hardware cases, the end result is that the last classification
+                                        # wins, which is what we want.
+                                        try:
+                                            del hw_class_dict[m.group(2)]
+                                        except:
+                                            pass
+
                                     m = re.match( r"^config (\w*)", kline )
                                     if m:
                                         non_hw_class_dict[m.group(1)] = classification_file.name
+
+                                        # being in both h/w and non-hardware leads us to results where we
+                                        # can't easily silence a warning. So if we've added it to h/w we need
+                                        # remove it from non-hardware. If we do it in both the hardware and
+                                        # non hardware cases, the end result is that the last classification
+                                        # wins, which is what we want.
+                                        try:
+                                            del hw_class_dict[m.group(1)]
+                                        except:
+                                            pass
 
                         # this is jut to slow, but keeping it for reference.
                         #     try:
@@ -672,9 +717,29 @@ def config_queue_read( config_queue_file ):
                                     m = re.match( r"^(menu).*config (\w*)", kline )
                                     if m:
                                         hw_class_dict[m.group(2)] = classification_file.name
+
+                                        # being in both h/w and non-hardware leads us to results where we
+                                        # can't easily silence a warning. So if we've added it to h/w we need
+                                        # remove it from non-hardware. If we do it in both the hardware and
+                                        # non hardware cases, the end result is that the last classification
+                                        # wins, which is what we want.
+                                        try:
+                                            del non_hw_class_dict[m.group(2)]
+                                        except:
+                                            pass
+
                                     m = re.match( r"^config (\w*)", kline )
                                     if m:
                                         hw_class_dict[m.group(1)] = classification_file.name
+                                        # being in both h/w and non-hardware leads us to results where we
+                                        # can't easily silence a warning. So if we've added it to h/w we need
+                                        # remove it from non-hardware. If we do it in both the hardware and
+                                        # non hardware cases, the end result is that the last classification
+                                        # wins, which is what we want.
+                                        try:
+                                            del non_hw_class_dict[m.group(1)]
+                                        except:
+                                            pass
 
                             # this is jut to slow, but keeping it for reference.
                             # try:
@@ -721,7 +786,6 @@ def config_queue_read( config_queue_file ):
                 issues_dict["redefined_option"][o][k] = fragments_defining_option[k]
                 # val = fragments_defining_option[k]
                 # print( "       - {}: {} ({})".format(o,k,val) )
-
 
     # this needs to just be captured in a class, so we can return one thing,
     # versus the growing list
