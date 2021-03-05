@@ -1137,7 +1137,7 @@ if do_blame or show_only_mismatch:
                 else:
                     if do_sanity:
                         print( "[ERROR]: sanity check failed. .config contains a value that is not marked as a user specified value: %s" % o )
-                    sys.exit(1)
+                        sys.exit(1)
 
         if option and not config_found:
             print( "    [INFO]: config '{}' was not in the .config".format(option) )
