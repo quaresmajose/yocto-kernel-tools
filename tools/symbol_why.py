@@ -600,9 +600,10 @@ def config_queue_read( config_queue_file ):
 
             fragment = line.split( '#' )
             frag_name = fragment[0].rstrip()
+            frag_type = fragment[1].rstrip().lstrip()
 
             # print("Line {}: {}".format(cnt, line))
-            # print("Fragment: {}/{}".format(frag_dir,frag_name))
+            # print("{} Fragment: {}/{}".format(frag_type,frag_dir,frag_name))
 
             frag_dict[frag_name] = OrderedDict()
 
@@ -623,7 +624,6 @@ def config_queue_read( config_queue_file ):
                         if m:
                             o_noprefix = re.sub( "^CONFIG_", "", m.group(1) )
                             hw_class_dict[o_noprefix.rstrip()] = str(hardware_cfg.resolve())
-
                             # being in both h/w and non-hardware leads us to results where we
                             # can't easily silence a warning. So if we've added it to h/w we need
                             # remove it from non-hardware. If we do it in both the hardware and
@@ -759,12 +759,36 @@ def config_queue_read( config_queue_file ):
             with open( str(frag_path) ) as config_frag:
                 for cline in config_frag:
                     c,value = split_option( cline )
+                    o_noprefix = ""
+                    if c:
+                        o_noprefix = re.sub( "^CONFIG_", "", c )
                     if c == "invalid option format":
                         if frag_name in issues_dict["malformated_option"]:
                             issues_dict["malformated_option"][frag_name].append( value )
                         else:
                             issues_dict["malformated_option"][frag_name] = [ value ]
                     elif c:
+                        if frag_type == "hardware":
+                            if use_classifiers:
+                                # print( "            hw classification for: %s,%s" % (o_noprefix,str(frag_path)))
+                                hw_class_dict[o_noprefix] = str(frag_path)
+                                # we can't be both hardware and software, so we should be deleting
+                                # one or the other if in both
+                                try:
+                                    del non_hw_class_dict[o_noprefix.rstrip()]
+                                except:
+                                    pass
+                        elif frag_type == "non-hardware":
+                            if use_classifiers:
+                                # we can't be both hardware and software, so we should be deleting
+                                # one or the other if in both
+                                non_hw_class_dict[o_noprefix] = str(frag_path)
+                                try:
+                                    # print( "deleting %s from hw_class, since it is also software" % o_noprefix.rstrip() )
+                                    del hw_class_dict[o_noprefix.rstrip()]
+                                except:
+                                    pass
+
                         if not c in frag_dict[frag_name]:
                             frag_dict[frag_name][c] = value
                         else:
@@ -1076,6 +1100,8 @@ if do_analysis or do_invalid:
         if option in invalid_fragment_syms:
             print( "[WARNING]: option '%s' is not valid in the active configuration" % option )
 
+
+syms_we_didnt_find_in_the_config = option_dict.copy()
 if do_blame or show_only_mismatch:
     # print( "\n" )
 
@@ -1130,6 +1156,14 @@ if do_blame or show_only_mismatch:
                 if deeper_check or mismatch:
                     blame_analysis( o, val, blame_string, mismatch, show_only_mismatch, use_classifiers )
 
+                try:
+                    # delete any option we see, whatever is left, wasn't found in the .config at all
+                    # and is something we should be checking for mismatches.
+                    del syms_we_didnt_find_in_the_config[o]
+                except:
+                    # could warn here, something is up. We just read a config value we didn't expect
+                    pass
+
                 if o in syms_we_think_are_in_the_config:
                     # this matches the list of symbols we think have user values from above, so
                     # it is sane.
@@ -1142,3 +1176,20 @@ if do_blame or show_only_mismatch:
         if option and not config_found:
             print( "    [INFO]: config '{}' was not in the .config".format(option) )
             blame_analysis( option, None, "# {} is not in .config".format(option), False, False, use_classifiers )
+
+        if not option:
+            for o in syms_we_didnt_find_in_the_config:
+                o_noprefix = re.sub( "^CONFIG_", "", o )
+                if o_noprefix in hw_dict:
+                    # now finally, if it wasn't in the .config, but wasn't set to anything
+                    # we can give that a pass (maybe add a --strict flag in the future )
+                    last_val = ""
+                    for f in syms_we_didnt_find_in_the_config[o]:
+                        last_val = option_dict[o][f]
+
+                    if last_val != "n":
+                        if show_only_mismatch:
+                            # print( "mismatch: %s [%s]" % (o,last_val))
+                            blame_string = ""
+                            blame_analysis( o, "n", blame_string, True, show_only_mismatch, use_classifiers )
+                            print( "\n" )
