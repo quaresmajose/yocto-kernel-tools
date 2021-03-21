@@ -529,7 +529,7 @@ def blame_analysis( option, val, blame_string, mismatch, show_only_mismatch, use
 
         if (o_noprefix in non_hw_dict) and (not o_noprefix in hw_dict):
             if verbose:
-                print( "[INFO]: mismatch on non-required config found (call without --classify for details)" )
+                print( "[INFO]: mismatch on non-required config [%s] found (call without --classify for details)" % o_noprefix )
 
             return
 
@@ -595,6 +595,20 @@ def config_queue_read( config_queue_file ):
     except:
         return frag_dict,option_dict,issues_dict,hw_class_dict,non_hw_class_dict
 
+
+    # There are two passes through the queue.
+    #
+    # First pass:
+    #             - the fragments and how they are included for classification.
+    #               "kconf include" ..
+    #             - broad classification instructions (.kcf files)
+    #
+    # Second pass:
+    #             - special files and their classification, this allows us to
+    #               override / reclassify something that was "kconf included"
+    #               a certain way.
+
+    # first pass start
     with open(config_queue_file) as fp:
         for cnt, line in enumerate(fp):
 
@@ -613,43 +627,6 @@ def config_queue_read( config_queue_file ):
             frag_dirname = frag_path.parent.resolve()
             non_hardware_classification = Path( str(frag_dirname) + "/non-hardware.kcf" ).resolve()
             hardware_classification = Path( str(frag_dirname) + "/hardware.kcf" ).resolve()
-
-            hardware_cfg = Path( str(frag_dirname) + "/hardware.cfg" ).resolve()
-            non_hardware_cfg = Path( str(frag_dirname) + "/non-hardware.cfg" ).resolve()
-
-            if hardware_cfg.exists() and use_classifiers:
-                with open( str(hardware_cfg) ) as classification_file:
-                    for cline in classification_file:
-                        m = re.match( r"(CONFIG_[^= ]+)", cline )
-                        if m:
-                            o_noprefix = re.sub( "^CONFIG_", "", m.group(1) )
-                            hw_class_dict[o_noprefix.rstrip()] = str(hardware_cfg.resolve())
-                            # being in both h/w and non-hardware leads us to results where we
-                            # can't easily silence a warning. So if we've added it to h/w we need
-                            # remove it from non-hardware. If we do it in both the hardware and
-                            # non hardware cases, the end result is that the last classification
-                            # wins, which is what we want.
-                            try:
-                                del non_hw_class_dict[o_noprefix.rstrip()]
-                            except:
-                                pass
-
-            if non_hardware_cfg.exists() and use_classifiers:
-                with open( str(non_hardware_cfg) ) as classification_file:
-                    for cline in classification_file:
-                        m = re.match( r"(CONFIG_[^= ]+)", cline )
-                        if m:
-                            o_noprefix = re.sub( "^CONFIG_", "", m.group(1) )
-                            non_hw_class_dict[o_noprefix.rstrip()] = str(non_hardware_cfg.resolve())
-                            # being in both h/w and non-hardware leads us to results where we
-                            # can't easily silence a warning. So if we've added it to h/w we need
-                            # remove it from non-hardware. If we do it in both the hardware and
-                            # non hardware cases, the end result is that the last classification
-                            # wins, which is what we want.
-                            try:
-                                del hw_class_dict[o_noprefix.rstrip()]
-                            except:
-                                pass
 
             if non_hardware_classification.exists() and use_classifiers:
                 if verbose:
@@ -688,7 +665,7 @@ def config_queue_read( config_queue_file ):
                                         except:
                                             pass
 
-                        # this is jut to slow, but keeping it for reference.
+                        # this is jut too slow, but keeping it for reference.
                         #     try:
                         #         ck = kconfiglib.Kconfig( cline.rstrip(), warn=False )
                         #     except:
@@ -707,7 +684,7 @@ def config_queue_read( config_queue_file ):
 
             if hardware_classification.exists() and use_classifiers:
                 if verbose:
-                    print( "[DBG}: hardware classification found: %s" % hardware_classification )
+                    print( "[DBG]: hardware classification found: %s" % hardware_classification )
                 with open( str(hardware_classification) ) as classification_file:
                     for cline in classification_file:
                         kconfig_start = Path( ksrc + "/" + cline.rstrip() )
@@ -730,7 +707,8 @@ def config_queue_read( config_queue_file ):
 
                                     m = re.match( r"^config (\w*)", kline )
                                     if m:
-                                        hw_class_dict[m.group(1)] = classification_file.name
+                                        hw_class_dict[m.group(1).rstrip()] = classification_file.name
+
                                         # being in both h/w and non-hardware leads us to results where we
                                         # can't easily silence a warning. So if we've added it to h/w we need
                                         # remove it from non-hardware. If we do it in both the hardware and
@@ -741,17 +719,6 @@ def config_queue_read( config_queue_file ):
                                         except:
                                             pass
 
-                            # this is jut to slow, but keeping it for reference.
-                            # try:
-                            #     ck = kconfiglib.Kconfig( cline.rstrip(), warn=False )
-                            # except:
-                            #     ck = None
-                            # if ck:
-                            #     print( "=================== %s" % cline.rstrip() )
-                            #     for c in ck.unique_defined_syms:
-                            #         print( "c: %s" % c.name )
-                            #         hw_class_dict[c.name] = classification_file
-                                #print( ck.unique_defined_syms )
                         else:
                             if verbose:
                                 print( "[WARNING]: %s does not exist, but was a classifier" % kconfig_start )
@@ -801,6 +768,62 @@ def config_queue_read( config_queue_file ):
                             option_dict[c] = OrderedDict()
 
                         option_dict[c][frag_name] = value
+
+
+    # 2nd pass start
+    with open(config_queue_file) as fp:
+        for cnt, line in enumerate(fp):
+
+            fragment = line.split( '#' )
+            frag_name = fragment[0].rstrip()
+            frag_type = fragment[1].rstrip().lstrip()
+
+            # print("Line {}: {}".format(cnt, line))
+            # print("{} Fragment: {}/{}".format(frag_type,frag_dir,frag_name))
+
+            frag_path = Path( str(frag_dir) + "/" + frag_name.rstrip() )
+            frag_full_path = frag_path.resolve()
+
+            frag_dirname = frag_path.parent.resolve()
+
+            hardware_cfg = Path( str(frag_dirname) + "/hardware.cfg" ).resolve()
+            non_hardware_cfg = Path( str(frag_dirname) + "/non-hardware.cfg" ).resolve()
+
+            if hardware_cfg.exists() and use_classifiers:
+                with open( str(hardware_cfg) ) as classification_file:
+                    for cline in classification_file:
+                        m = re.match( r"(CONFIG_[^= ]+)", cline )
+                        if m:
+                            o_noprefix = re.sub( "^CONFIG_", "", m.group(1) )
+                            hw_class_dict[o_noprefix.rstrip()] = str(hardware_cfg.resolve())
+                            # being in both h/w and non-hardware leads us to results where we
+                            # can't easily silence a warning. So if we've added it to h/w we need
+                            # remove it from non-hardware. If we do it in both the hardware and
+                            # non hardware cases, the end result is that the last classification
+                            # wins, which is what we want.
+                            try:
+                                del non_hw_class_dict[o_noprefix.rstrip()]
+                            except:
+                                pass
+
+            if non_hardware_cfg.exists() and use_classifiers:
+                with open( str(non_hardware_cfg) ) as classification_file:
+                    for cline in classification_file:
+                        m = re.match( r"(CONFIG_[^= ]+)", cline )
+                        if m:
+                            o_noprefix = re.sub( "^CONFIG_", "", m.group(1) )
+                            non_hw_class_dict[o_noprefix.rstrip()] = str(non_hardware_cfg.resolve())
+                            # being in both h/w and non-hardware leads us to results where we
+                            # can't easily silence a warning. So if we've added it to h/w we need
+                            # remove it from non-hardware. If we do it in both the hardware and
+                            # non hardware cases, the end result is that the last classification
+                            # wins, which is what we want.
+                            try:
+                                del hw_class_dict[o_noprefix.rstrip()]
+                            except Exception as e:
+                                pass
+
+
 
     for o in option_dict:
         fragments_defining_option = option_dict[o]
