@@ -1213,6 +1213,9 @@ if do_blame or show_only_mismatch:
                     if last_val != "n":
                         if show_only_mismatch:
                             # print( "mismatch: %s [%s]" % (o,last_val))
-                            blame_string = ""
-                            blame_analysis( o, "n", blame_string, True, show_only_mismatch, use_classifiers )
-                            print( "\n" )
+                            # if the symbol is invalid (that's a different check, not this mismatch check, so
+                            # we won't report it), then we shouldn't call blame
+                            if not o in invalid_fragment_syms:
+                                blame_string = ""
+                                blame_analysis( o, "n", blame_string, True, show_only_mismatch, use_classifiers )
+                                print( "\n" )
