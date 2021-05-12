@@ -3263,6 +3263,23 @@ class Kconfig(object):
                 else:
                     self._parse_error("unrecognized option")
 
+            elif t0 is _T_MODULES:
+                # To reduce warning spam, only warn if 'option modules' is
+                # set on some symbol that isn't MODULES, which should be
+                # safe. I haven't run into any projects that make use
+                # modules besides the kernel yet, and there it's likely to
+                # keep being called "MODULES".
+                if node.item is not self.modules:
+                    self._warn("the 'modules' option is not supported. "
+                               "Let me know if this is a problem for you, "
+                               "as it wouldn't be that hard to implement. "
+                               "Note that modules are supported -- "
+                               "Kconfiglib just assumes the symbol name "
+                               "MODULES, like older versions of the C "
+                               "implementation did when 'option modules' "
+                               "wasn't used.",
+                               self.filename, self.linenr)
+
             elif t0 is _T_OPTIONAL:
                 if node.item.__class__ is not Choice:
                     self._parse_error('"optional" is only valid for choices')
