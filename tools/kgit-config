@@ -472,7 +472,7 @@ parser = argparse.ArgumentParser(
          Examples:
 
             # process a defconfig and output hardware options suitable for a BSP
-            % kgit-config create --ksrc ~/poky-kernel/linux-yocto.git/ --defconfig ~/poky-kernel/linux-yocto.git/arch/x86/configs/x86_64_defconfig --kmeta ~/poky-kernel/kernel-cache 
+            % kgit-config create --ksrc ~/poky-kernel/linux-yocto.git/ --defconfig ~/poky-kernel/linux-yocto.git/arch/x86/configs/x86_64_defconfig --kmeta ~/poky-kernel/kernel-cache
 
             # query a set of fragments for details on options
             % kgit-config query --kmeta ~/poky-kernel/kernel-cache CONFIG_DEBUG_FS
@@ -570,7 +570,7 @@ if args.savetemps:
 
 if args.verbose:
     verbose = True
-    
+
 if args.create:
     if not ksrc:
         print( "[ERROR]: Kernel source directory not provided" )
@@ -694,7 +694,7 @@ if args.query:
     with tempdir() as dirpath:
         if save_temps:
             print( "[INFO]: --savetemps was passed, will not remove: %s" % dirpath )
-        
+
         possible_scc_files = []
         possible_cfg_files = []
         # list all the features
@@ -777,4 +777,3 @@ if args.query:
 
             else:
                 print( "no matching cfg files with option %s found" % regex )
-                                
