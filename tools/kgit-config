@@ -682,7 +682,7 @@ if args.create:
 if args.query:
     # todo: convert to absolute and make sure it exists
     if not args.kmeta:
-        print( "[ERROR]: meta data required for minimal BSP creation" )
+        print( "[ERROR]: meta data required for config query" )
         sys.exit(1)
 
     if args.args[0] == "query":
