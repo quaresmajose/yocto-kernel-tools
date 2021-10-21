@@ -776,4 +776,4 @@ if args.query:
                         pass
 
             else:
-                print( "no matching cfg files with option %s found" % regex )
+                print( "no matching cfg files with option %s found" % oregex )
