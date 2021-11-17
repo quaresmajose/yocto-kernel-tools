@@ -33,6 +33,7 @@ import tempfile
 import argparse
 import re
 import subprocess
+import pathlib
 
 @contextlib.contextmanager
 def cd(newdir, cleanup=lambda: True):
@@ -362,9 +363,92 @@ def config_queue_read( config_queue_file ):
     # this needs to just be captured in a class, so we can return one thing,
     # versus the growing list
     return frag_dict,option_dict,issues_dict,hw_class_dict,non_hw_class_dict
+
+def create_bsp_template( name, hardware_dict, policy_dict, outdir ):
+    if verbose:
+        print( "[INFO]: creating bsp template for: %s" % name )
+
+    if not os.path.exists( "{}/kernel-cache/bsp/{}".format( outdir,name ) ):
+        os.makedirs( "{}/kernel-cache/bsp/{}".format( outdir,name ) )
+
+    bsp_file = "{}/kernel-cache/bsp/{}/{}.scc".format(outdir,name,name)
+    hw_cfg_file = "{}/kernel-cache/bsp/{}/{}-hw.cfg".format(outdir,name,name)
+    policy_cfg_file = "{}/kernel-cache/bsp/{}/{}-policy.cfg".format(outdir,name,name)
+
+    with open( bsp_file, "w" ) as w:
+        w.write("""\
+# SPDX-License-Identifier: MIT
+define KMACHINE {}
+define KTYPE standard
+
+include ktypes/base/base.scc
+kconf hardware {}-hw.cfg
+# kconf non-hardware {}-policy.cfg
+
+""".format(name,name,name) )
         
+    with open( hw_cfg_file, "w" ) as w:
+        for i,v in hardware_dict.items():
+            if i:
+                w.write( "CONFIG_%s=%s\n" % (i,v))
+
+    with open( policy_cfg_file, "w" ) as w:
+        for i,v in policy_dict.items():
+            if i:
+                w.write( "CONFIG_%s=%s\n" % (i,v))
+
+    print( "BSP template created: %s" % bsp_file )
+    print( "   Hardware options: %s" % hw_cfg_file )
+    print( "   Policy options: %s" % policy_cfg_file )
+
+
+def create_option_classifiers( ksrc, outdir ):
+    if verbose:
+        print( "[INFO]: creating option classifiers in %s" % outdir )
+    try:
+        env = os.environ.copy()
+        if verbose:
+            print( "[NOTE]: running: kgit-create-buckets -v hardware nonhardware" )
+        analysis = subprocess.check_output([ 'kgit-create-buckets',
+                                             '-v', '-v',
+                                             'hardware',
+                                             'nonhardware'],
+                                           stderr=subprocess.STDOUT,
+                                           cwd=ksrc, env=env ).decode('utf-8')
+    except subprocess.CalledProcessError as e:
+        print( "[ERROR]: creation failed: %s" % e.output.decode('utf-8'))
+
+    if not os.path.exists( "{}/kernel-cache/ktypes/base".format( outdir ) ):
+        os.makedirs( "{}/kernel-cache/ktypes/base".format( outdir) )
+
+    shutil.copy(  "/tmp/hw_bucket.txt.sorted", "{}/kernel-cache/ktypes/base/hardware.kcf".format(outdir) )
+    shutil.copy(  "/tmp/non_hw_bucket.txt.sorted", "{}/kernel-cache/ktypes/base/non-hardware.kcf".format(outdir) )
+
+    with open( "{}/kernel-cache/ktypes/base/base.scc".format(outdir), "w" ) as w:
+        w.write("""\
+kconf hardware basehw.cfg
+kconf non-hardware basenonhw.cfg
+""" )
+
+    with open( "{}/kernel-cache/ktypes/base/basehw.cfg".format(outdir), "w" ) as w:
+        w.write("""\
+# placeholder for hardware options
+""" )
+
+    with open( "{}/kernel-cache/ktypes/base/basenonhw.cfg".format(outdir), "w" ) as w:
+        w.write("""\
+# placeholder for non-hardware options
+""" )
+
+    if verbose:
+        print( "[INFO]: option classifiers creation done" )
+
+    return "kernel-cache"
+
+
 pathname = os.path.dirname(sys.argv[0])
 
+global verbose
 verbose = ''
 use_classifiers = True
 ksrc = ''
@@ -429,6 +513,10 @@ parser.add_argument("-e", "--entrypoint",
                     help="fragment to use as an entrypoint for classification (default is ktypes/standard/standard.scc")
 parser.add_argument( "--savetemps", action='store_true',
                      help="don't delete temporary working directory" )
+parser.add_argument("-o", "--outdir",
+                    help="path to the output directory (defaults to '.')")
+parser.add_argument( "--bsp",
+                     help="create a BSP file with the provided name" )
 
 # parser.add_argument("--strict", action='store_true',
 #                     help="When checking or processing, strictly apply ARCH and other config settings (i.e. no global checking will be done)" )
@@ -472,6 +560,11 @@ if query_flag:
 if args.ksrc:
     ksrc=args.ksrc
 
+outdir="."
+if args.outdir:
+    outdir=args.outdir
+outdir = pathlib.Path(outdir).resolve()
+
 if args.savetemps:
     save_temps = True
 
@@ -485,31 +578,42 @@ if args.create:
 
     # todo: convert to absolute and make sure it exists
     if not args.kmeta:
-        print( "[ERROR]: meta data required for minimal BSP creation" )
-        sys.exit(1)
+        if verbose:
+            print( "[INFO]: no meta-data provided, creating option framework based on kernel tree: %s" % ksrc )
+        kmeta = create_option_classifiers( ksrc, outdir )
+        kmeta = pathlib.Path(kmeta).resolve()
+
+        # creation will have made this entry point
+        args.entrypoint = "ktypes/base/base.scc"
+        args.kmeta = kmeta
 
     # todo: convert to absolute and make sure it exists
-    if not args.defconfig:
+    if args.defconfig:
+        defconfig_path = pathlib.Path(args.defconfig).exists()
+    else:
         print( "[ERROR]: kernel defconfig required for minimal BSP creation" )
         sys.exit(1)
 
-    print( "[INFO]: Creating minimal h/w BSP config" )
+    if verbose:
+        print( "[INFO]: Creating minimal h/w BSP config" )
 
     # make a temp directory to hold our work
     with tempdir() as dirpath:
-        if save_temps:
+        if save_temps and verbose:
             print( "[INFO]: --savetemps was passed, will not remove: %s" % dirpath )
 
         try:
             entry_point = "ktypes/standard/standard.scc"
             if args.entrypoint:
                 entry_point =  args.entrypoint
+
             if verbose:
-                print(  [ 'scc',
-                          '--force',
-                          '-I{}'.format( args.kmeta ),
-                          '-o {}:cfg'.format( dirpath ),
-                          '{}/{}'.format(args.kmeta,entry_point)] )
+                print( "[NOTE]: running: " +
+                       'scc' +
+                       ' --force' +
+                       ' -I{}'.format( args.kmeta ) +
+                       ' -o {}:cfg'.format( dirpath ) +
+                       ' {}/{}'.format(args.kmeta,entry_point) )
 
             env = os.environ.copy()
             analysis = subprocess.check_output([ 'scc',
@@ -520,7 +624,7 @@ if args.create:
                                                cwd=dirpath, env=env ).decode('utf-8')
         except subprocess.CalledProcessError as e:
             print( "[ERROR]: creation failed: %s" % e.output.decode('utf-8'))
-        
+            sys.exit(1)
 
         frag_dict,option_dict,issues_dict,hw_dict,non_hw_dict = \
                                config_queue_read( dirpath + "/config.queue" )
@@ -535,11 +639,11 @@ if args.create:
                 if c:
                     o_noprefix = re.sub( "^CONFIG_", "", c )
                 if c == "invalid option format":
-                    print( "invalid option: %s" % cline )
+                    # print( "invalid option: %s" % cline )
                     continue
 
-                if verbose:
-                    print( "defconfig: %s --> %s" % (c,value))
+                #if verbose:
+                #    print( "defconfig: %s --> %s" % (c,value))
 
                 try:
                     if non_hw_dict[o_noprefix]:
@@ -551,6 +655,10 @@ if args.create:
                     #print( "     hardware option %s" % o_noprefix)
                     defconfig_hw_options[o_noprefix] = value
 
+
+        if args.bsp:
+            create_bsp_template( args.bsp, defconfig_hw_options, defconfig_nonhw_options, outdir )
+            sys.exit(0)
 
         print( "[INFO]: BSP h/w configuration values:" )
         for i,v in defconfig_hw_options.items():

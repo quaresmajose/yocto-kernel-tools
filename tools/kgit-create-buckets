@@ -170,7 +170,9 @@ do_hardware_buckets()
 {
     dirs=$1
 
-    mv -f /tmp/hw_bucket.txt /tmp/hw_bucket.txt.old
+    if [ -f /tmp/hw_bucket.txt ]; then
+	mv -f /tmp/hw_bucket.txt /tmp/hw_bucket.txt.old
+    fi
 
     for d in $dirs; do
         DEBUG "# Analyzing: $d"
