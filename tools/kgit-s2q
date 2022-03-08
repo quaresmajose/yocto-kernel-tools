@@ -21,7 +21,7 @@ usage()
 cat <<EOF
 
  kgit-s2q [--author <author name> ] [-n] [--patches <dir>] [-a] [-i] [-f]
-          [--current] [--series] [--annotated] [--gen] [-c <count>] [-v] [-h] -- [<patch>]"
+          [--commit-sha <type>] [--current] [--series] [--annotated] [--gen] [-c <count>] [-v] [-h] -- [<patch>]"
 
     --series:    dump the series file and exit
     --gen:       generate patch headers if missing
@@ -31,6 +31,8 @@ cat <<EOF
     --annotated: the series is annotated, use the annotations for auto resume
     --fuzzy:     match autoresume on fuzzy heuristics (i.e. subject only)
     --clean:     remove any patch artifacts that may remain from previous runs (i.e. sentinel files)
+    --commit-sha type of commit sha's to create: 'author date' or 'commit date' (author or date)
+                 default is 'commit date'
     -c:          number of commits to test when autoresuming
     -a:          autoresume series after last sucessfully applied patch
     -i:          interactively prompt if commit information is missing
@@ -280,6 +282,7 @@ EOF
 
 AUTORESUME=""
 quilt_author=""
+commit_sha_type="date"
 while test $# != 0
 do
 	case "$1" in
@@ -287,6 +290,10 @@ do
 		shift
 		quilt_author="$1"
 		;;
+	--commit-sha)
+                shift
+	        commit_sha_type="$1"
+	        ;;
 	--patches)
 		shift
 		QUILT_PATCHES="$1"
@@ -558,9 +565,13 @@ do
 		echo "($APPLIED/$COUNT) `basename $i`"
 	fi
 
-	git am --keep-non-patch $DIR/$i > /dev/null 2>&1
+	git_am_options=""
+	if "$commit_sha_type" == "author"; then
+		git_am_options="--committer-date-is-author-date"
+	fi
+	git am $git_am_options --keep-non-patch $DIR/$i > /dev/null 2>&1
 	if [ $? != 0 ];then
-		git am --abort > /dev/null 2>&1
+		git am $git_am_options --abort > /dev/null 2>&1
 		echo "[INFO]: check of $DIR/$i with \"git am\" did not pass, trying reduced context."
 		git am -C1 --keep-non-patch $DIR/$i > /dev/null 2>&1
 		if [ $? = 0 ]; then
@@ -568,7 +579,7 @@ do
 			echo $DIR/$i $commit >> $REFRESH
 			continue
 		fi
-		git am --abort > /dev/null 2>&1
+		git am $git_am_options --abort > /dev/null 2>&1
 		echo "[INFO]: Context reduced git-am of $DIR/$i with \"git am\" did not work, trying \"apply\"."
 	else
 		commit=$(git rev-parse HEAD)
