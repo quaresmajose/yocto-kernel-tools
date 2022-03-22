@@ -23,27 +23,28 @@ cat <<EOF
  kgit-s2q [--author <author name> ] [-n] [--patches <dir>] [-a] [-i] [-f]
           [--commit-sha <type>] [--current] [--series] [--annotated] [--gen] [-c <count>] [-v] [-h] -- [<patch>]"
 
-    --series:    dump the series file and exit
-    --gen:       generate patch headers if missing
-    --author:    patch author to use if missing, in the format of: "First Last <foo@bar.com>"
-    --patches:   directory containing the series file to use
-    --current:   show top currently applied patch
-    --annotated: the series is annotated, use the annotations for auto resume
-    --fuzzy:     match autoresume on fuzzy heuristics (i.e. subject only)
-    --clean:     remove any patch artifacts that may remain from previous runs (i.e. sentinel files)
-    --commit-sha type of commit sha's to create: 'author date' or 'commit date' (author or date)
-                 default is 'commit date'
-    -c:          number of commits to test when autoresuming
-    -a:          autoresume series after last sucessfully applied patch
-    -i:          interactively prompt if commit information is missing
-    -v:          verbose
-    -n:          dry run
-    -f:          force the first patch of the series as the starting point
-    -h:          help
+    --series:     dump the series file and exit
+    --gen:        generate patch headers if missing
+    --author:     patch author to use if missing, in the format of: "First Last <foo@bar.com>"
+    --patches:    directory containing the series file to use
+    --current:    show top currently applied patch
+    --annotated:  the series is annotated, use the annotations for auto resume
+    --fuzzy:      match autoresume on fuzzy heuristics (i.e. subject only)
+    --clean:      remove any patch artifacts that may remain from previous runs (i.e. sentinel files)
+    --commit-sha: type of commit sha to create: "author" or "applied". 'author' uses the date of the
+                  patch author, and 'applied' uses the date (i.e. current time) of when the patch is applied.
+                  The default is 'applied'
+    -c:           number of commits to test when autoresuming
+    -a:           autoresume series after last sucessfully applied patch
+    -i:           interactively prompt if commit information is missing
+    -v:           verbose
+    -n:           dry run
+    -f:           force the first patch of the series as the starting point
+    -h:           help
 
-    --:          marks the end of options on the command line
+    --:           marks the end of options on the command line
 
-    <patch>:     patch to use as the starting point (turns autoresume off)
+    <patch>:      patch to use as the starting point (turns autoresume off)
 
 EOF
 }
@@ -282,7 +283,7 @@ EOF
 
 AUTORESUME=""
 quilt_author=""
-commit_sha_type="date"
+commit_sha_type="applied"
 while test $# != 0
 do
 	case "$1" in
@@ -566,7 +567,7 @@ do
 	fi
 
 	git_am_options=""
-	if "$commit_sha_type" == "author"; then
+	if [ "$commit_sha_type" == "author" ]; then
 		git_am_options="--committer-date-is-author-date"
 	fi
 	git am $git_am_options --keep-non-patch $DIR/$i > /dev/null 2>&1
