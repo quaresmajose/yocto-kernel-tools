@@ -32,7 +32,7 @@ kconf() {
     # if there are any classifiers in the fragment dir, we copy them as well
     frag_dir=$(dirname ${frag})
     # echo "frag dir: ${frag_dir}" >&2
-    for c in ${frag_dir}/*.kcf ${frag_dir}/hardware.cfg ${frag_dir}/non-hardware.cfg ${frag_dir}/required.cfg ${frag_dir}/optional.cfg; do
+    for c in ${frag_dir}/*.kcf ${frag_dir}/hardware.cfg ${frag_dir}/non-hardware.cfg ${frag_dir}/required.cfg ${frag_dir}/optional.cfg ${frag_dir}/y_or_m_enabled.cfg; do
         local simple_special_name=$(basename ${c})
         if [ -e "${c}" ]; then
             cp -f ${c} "${outdir}/configs/${cbranch_name}/${relative_config_dir}"

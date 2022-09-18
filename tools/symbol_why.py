@@ -235,8 +235,18 @@ if not os.getenv("ARCH"):
     print( "ERROR: arch must be set (via ARCH environment variable" )
     sys.exit(1)
 
+if not os.getenv("CC"):
+    os.environ["CC"] = "gcc"
+    print( "[WARNING]: CC not found in environment, setting to gcc" )
+
+if not os.getenv("LD"):
+    os.environ["LD"] = "ld"
+    print( "[WARNING]: LD not found in environment, setting to ld2l" )
+
 if not ksrc:
     ksrc = "."
+
+os.environ["srctree"] = ksrc
 
 kconf = ksrc + "/Kconfig"
 if not os.path.exists( kconf ):
@@ -589,6 +599,7 @@ def config_queue_read( config_queue_file ):
 
     non_hw_class_dict = OrderedDict()
     hw_class_dict = OrderedDict()
+    y_or_m_dict = OrderedDict()
 
     try:
         p.resolve(True)
@@ -788,6 +799,15 @@ def config_queue_read( config_queue_file ):
 
             hardware_cfg = Path( str(frag_dirname) + "/hardware.cfg" ).resolve()
             non_hardware_cfg = Path( str(frag_dirname) + "/non-hardware.cfg" ).resolve()
+            y_or_m = Path( str(frag_dirname) + "/y_or_m_enabled.cfg" ).resolve()
+
+            if y_or_m.exists():
+                with open( str(y_or_m) ) as classification_file:
+                    for cline in classification_file:
+                        m = re.match( r"(CONFIG_[^= ]+)", cline )
+                        if m:
+                            o_noprefix = re.sub( "^CONFIG_", "", m.group(1) )
+                            y_or_m_dict[o_noprefix.rstrip()] = str(y_or_m.resolve())
 
             if hardware_cfg.exists() and use_classifiers:
                 with open( str(hardware_cfg) ) as classification_file:
@@ -836,7 +856,7 @@ def config_queue_read( config_queue_file ):
 
     # this needs to just be captured in a class, so we can return one thing,
     # versus the growing list
-    return frag_dict,option_dict,issues_dict,hw_class_dict,non_hw_class_dict
+    return frag_dict,option_dict,issues_dict,hw_class_dict,non_hw_class_dict,y_or_m_dict
 
 # Create a Config object representing a Kconfig configuration. (Any number of
 # these can be created -- the library has no global state.
@@ -869,7 +889,7 @@ if option:
     if not nodes:
         print("[WARNING]: no references to {} found".format(option))
 
-frag_dict,option_dict,issues_dict,hw_dict,non_hw_dict = config_queue_read( ".kernel-meta/config.queue" )
+frag_dict,option_dict,issues_dict,hw_dict,non_hw_dict,y_or_m_dict = config_queue_read( ".kernel-meta/config.queue" )
 
 
 # TODO: this should be a shared routine with the config queue reader
@@ -1175,6 +1195,15 @@ if do_blame or show_only_mismatch:
                             mismatch = True
                     else:
                         mismatch = True
+
+                if (o_noprefix in y_or_m_dict) and not strict:
+                    if last_val == "y" or last_val == "m":
+                        # this isn't a mismatch, since we've stated that yes or m are both
+                        # fine
+                        if verbose:
+                            print( "[INFO]: option %s mismatch skipped, as y or m are both fine" % o_noprefix )
+
+                        mismatch = False
 
                 if deeper_check or mismatch:
                     blame_analysis( o, val, blame_string, mismatch, show_only_mismatch, use_classifiers )
