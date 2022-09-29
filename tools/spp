@@ -300,8 +300,19 @@ search_include_paths()
     done
 }
 
+expand_if_full_path()
+{
+        for i in $@; do
+            if [ "${i:0:1}" = "/" ]; then
+                i=$(readlink -f $i)
+            fi
+            echo $i
+        done
+}
+
+
 # args are the input files
-infiles=$@
+infiles=$(expand_if_full_path $@)
 
 processed_files=""
 
